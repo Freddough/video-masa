@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Masa</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #08080a;
+            --surface: #111114;
+            --surface-2: #18181c;
+            --surface-3: #1f1f24;
+            --border: #252530;
+            --border-hover: #35354a;
+            --text: #eaeaf0;
+            --text-mid: #a0a0b8;
+            --text-dim: #606078;
+            --text-faint: #3a3a50;
+            --lime: #c8ff00;
+            --lime-dim: #c8ff0025;
+            --lime-glow: #c8ff0012;
+            --blue: #5eadff;
+            --blue-dim: #5eadff25;
+            --red: #ff6b6b;
+            --amber: #ffbe44;
+            --radius: 12px;
+            --radius-sm: 8px;
+            --radius-xs: 5px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Outfit', -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+            overflow-x: hidden;
+        }
+
+        /* Noise texture overlay */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        /* Ambient glow */
+        .glow-orb {
+            position: fixed;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, #c8ff0008 0%, transparent 70%);
+            top: -200px;
+            left: 50%;
+            transform: translateX(-50%);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .app {
+            position: relative;
+            z-index: 1;
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 56px 28px 100px;
+        }
+
+        /* ─── Header ─── */
+        .header {
+            margin-bottom: 28px;
+            animation: fadeUp 0.6s ease both;
+        }
+        .brand-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .brand-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--lime);
+            box-shadow: 0 0 16px var(--lime), 0 0 6px var(--lime);
+            animation: dotPulse 2.5s ease infinite;
+            flex-shrink: 0;
+        }
+        @keyframes dotPulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 16px var(--lime), 0 0 6px var(--lime); }
+            50% { opacity: 0.6; box-shadow: 0 0 8px var(--lime); }
+        }
+        .brand-name {
+            font-family: 'Outfit', sans-serif;
+            font-size: clamp(26px, 5vw, 34px);
+            font-weight: 600;
+            letter-spacing: -0.5px;
+            color: var(--lime);
+        }
+
+        .hero-title {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            font-size: clamp(36px, 6vw, 52px);
+            line-height: 1.05;
+            letter-spacing: -1.5px;
+            margin-bottom: 8px;
+        }
+        .hero-title .dim {
+            color: var(--text-dim);
+        }
+        .hero-sub {
+            font-size: 15px;
+            color: var(--text-dim);
+            font-weight: 400;
+            line-height: 1.5;
+        }
+
+        /* ─── Main Card ─── */
+        .main-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            margin-bottom: 16px;
+            animation: fadeUp 0.6s ease 0.1s both;
+        }
+
+        .section-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-bottom: 12px;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 24px;
+        }
+        .url-input {
+            flex: 1;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 14px 18px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: var(--text);
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .url-input:focus {
+            border-color: var(--lime);
+            box-shadow: 0 0 0 3px var(--lime-glow), inset 0 0 0 1px var(--lime-dim);
+        }
+        .url-input::placeholder { color: var(--text-faint); }
+
+        .add-btn {
+            background: var(--lime);
+            color: var(--bg);
+            border: none;
+            border-radius: var(--radius);
+            padding: 0 24px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+            letter-spacing: -0.2px;
+        }
+        .add-btn:hover {
+            background: #d9ff33;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 16px #c8ff0030;
+        }
+        .add-btn:active { transform: translateY(0); }
+
+        /* Divider */
+        .or-divider {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .or-line {
+            flex: 1;
+            height: 1px;
+            background: var(--border);
+        }
+        .or-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 2px;
+            color: var(--text-faint);
+            text-transform: uppercase;
+        }
+
+        /* Drop zone */
+        .drop-zone {
+            border: 1.5px dashed var(--border);
+            border-radius: var(--radius);
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.25s;
+            position: relative;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: var(--lime);
+            background: var(--lime-glow);
+        }
+        .drop-icon {
+            font-size: 28px;
+            margin-bottom: 10px;
+            filter: grayscale(0.5);
+        }
+        .drop-text {
+            font-size: 14px;
+            color: var(--text-mid);
+            margin-bottom: 4px;
+        }
+        .drop-text strong {
+            color: var(--lime);
+            cursor: pointer;
+        }
+        .drop-hint {
+            font-size: 12px;
+            color: var(--text-faint);
+        }
+        .file-input-hidden {
+            display: none;
+        }
+
+        /* ─── Controls Bar ─── */
+        .controls-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 32px;
+            flex-wrap: wrap;
+            animation: fadeUp 0.6s ease 0.2s both;
+        }
+
+        .checkbox-group {
+            display: flex;
+            gap: 4px;
+        }
+        .cb-pill {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 14px;
+            border-radius: 100px;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.2s;
+        }
+        .cb-pill:hover {
+            border-color: var(--border-hover);
+            background: var(--surface-2);
+        }
+        .cb-pill.active-transcribe {
+            border-color: var(--lime-dim);
+            background: var(--lime-glow);
+        }
+        .cb-pill.active-download {
+            border-color: var(--blue-dim);
+            background: #5eadff0a;
+        }
+        .cb-pill input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border: 1.5px solid var(--border-hover);
+            border-radius: 3px;
+            background: transparent;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.15s;
+            flex-shrink: 0;
+        }
+        .cb-pill input[type="checkbox"]:checked {
+            border-color: transparent;
+        }
+        .cb-pill.active-transcribe input:checked {
+            background: var(--lime);
+        }
+        .cb-pill.active-download input:checked {
+            background: var(--blue);
+        }
+        .cb-pill input[type="checkbox"]:checked::after {
+            content: '';
+            position: absolute;
+            top: 1px;
+            left: 4px;
+            width: 4px;
+            height: 7px;
+            border: solid var(--bg);
+            border-width: 0 1.5px 1.5px 0;
+            transform: rotate(45deg);
+        }
+        .cb-text {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-dim);
+            transition: color 0.15s;
+        }
+        .cb-pill:hover .cb-text { color: var(--text-mid); }
+        .cb-pill.active-transcribe .cb-text { color: var(--lime); }
+        .cb-pill.active-download .cb-text { color: var(--blue); }
+
+        .model-select {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 8px 14px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 13px;
+            color: var(--text-dim);
+            outline: none;
+            cursor: pointer;
+            margin-left: auto;
+            transition: border-color 0.2s;
+        }
+        .model-select:hover { border-color: var(--border-hover); }
+        .model-select:focus { border-color: var(--lime); }
+
+        /* ─── Divider ─── */
+        .section-divider {
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent);
+            margin-bottom: 24px;
+            animation: fadeUp 0.6s ease 0.3s both;
+        }
+
+        /* ─── Queue ─── */
+        .queue-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            animation: fadeUp 0.6s ease 0.3s both;
+        }
+        .queue-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--text-faint);
+        }
+        .clear-btn {
+            background: none;
+            border: none;
+            font-family: 'Outfit', sans-serif;
+            font-size: 12px;
+            color: var(--text-faint);
+            cursor: pointer;
+            padding: 2px 0;
+            transition: color 0.15s;
+        }
+        .clear-btn:hover { color: var(--red); }
+
+        .queue-empty {
+            text-align: center;
+            padding: 56px 20px;
+            color: var(--text-faint);
+            font-size: 14px;
+            animation: fadeUp 0.6s ease 0.35s both;
+        }
+        .queue-empty .empty-icon {
+            font-size: 24px;
+            margin-bottom: 8px;
+            opacity: 0.4;
+        }
+
+        /* ─── Job Cards ─── */
+        .job-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 18px 20px;
+            margin-bottom: 10px;
+            animation: cardIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+            transition: border-color 0.3s;
+        }
+        .job-card.status-done { border-color: #c8ff0020; }
+        .job-card.status-error { border-color: #ff6b6b20; }
+
+        @keyframes cardIn {
+            from { opacity: 0; transform: translateY(-12px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        .job-top {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .job-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--text);
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .job-title {
+            font-size: 12px;
+            color: var(--text-mid);
+            font-weight: 400;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: -4px;
+            margin-bottom: 6px;
+        }
+        .job-badges {
+            display: flex;
+            gap: 5px;
+            flex-shrink: 0;
+        }
+        .badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 100px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+        .badge-t { background: var(--lime-dim); color: var(--lime); }
+        .badge-d { background: var(--blue-dim); color: var(--blue); }
+        .badge-merged { background: #ffbe4420; color: var(--amber); }
+
+        .job-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+
+        .dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .dot-queued { background: var(--text-faint); }
+        .dot-downloading, .dot-transcribing {
+            background: var(--amber);
+            animation: blink 1s ease infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .dot-done { background: var(--lime); box-shadow: 0 0 6px var(--lime); }
+        .dot-error { background: var(--red); }
+
+        /* ─── Results ─── */
+        .job-results {
+            margin-top: 14px;
+            border-top: 1px solid var(--border);
+            padding-top: 14px;
+        }
+        .result-block { margin-bottom: 12px; }
+        .result-block:last-child { margin-bottom: 0; }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .result-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-faint);
+        }
+        .action-row { display: flex; gap: 6px; }
+
+        .copy-btn, .dl-btn, .toggle-ts {
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 4px 12px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .copy-btn:hover { border-color: var(--lime); color: var(--lime); }
+        .dl-btn {
+            color: var(--blue);
+            border-color: var(--blue-dim);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .dl-btn:hover { border-color: var(--blue); background: #5eadff0a; }
+        .toggle-ts:hover { border-color: var(--border-hover); color: var(--text-mid); }
+
+        .result-body {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 14px 16px;
+            font-size: 13px;
+            line-height: 1.7;
+            color: var(--text-mid);
+            max-height: 220px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .result-body.mono {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            line-height: 1.9;
+        }
+
+        .result-body::-webkit-scrollbar { width: 4px; }
+        .result-body::-webkit-scrollbar-track { background: transparent; }
+        .result-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+
+        /* ─── Footer ─── */
+        .footer {
+            text-align: center;
+            margin-top: 56px;
+            font-size: 11px;
+            color: var(--text-faint);
+            letter-spacing: 0.3px;
+            animation: fadeUp 0.6s ease 0.4s both;
+        }
+        .footer span { color: var(--lime); }
+
+        /* ─── Animations ─── */
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ─── Responsive ─── */
+        @media (max-width: 540px) {
+            .app { padding: 36px 16px 80px; }
+            .main-card { padding: 20px; }
+            .controls-bar { gap: 8px; }
+            .model-select { margin-left: 0; width: 100%; margin-top: 4px; }
+            .input-row { flex-direction: column; }
+            .add-btn { padding: 14px; border-radius: var(--radius); }
+        }
+    </style>
+</head>
+<body>
+    <div class="glow-orb"></div>
+
+    <div class="app">
+        <!-- Header -->
+        <div class="header">
+            <div class="brand-tag">
+                <div class="brand-dot"></div>
+                <div class="brand-name">Video Masa</div>
+            </div>
+        </div>
+
+        <!-- Main Input Card -->
+        <div class="main-card">
+            <div class="section-label">Add Video URL</div>
+            <div class="input-row">
+                <input type="text" class="url-input" id="urlInput"
+                    placeholder="Paste a YouTube, Instagram, TikTok, or any video URL"
+                    spellcheck="false" autocomplete="off">
+                <button class="add-btn" id="addBtn" onclick="addJob()">+ Add</button>
+            </div>
+
+            <div class="or-divider">
+                <div class="or-line"></div>
+                <div class="or-text">or drop files</div>
+                <div class="or-line"></div>
+            </div>
+
+            <div class="drop-zone" id="dropZone">
+                <div class="drop-icon">🎬</div>
+                <div class="drop-text">Drag & drop video/audio files, or <strong>click to browse</strong></div>
+                <div class="drop-hint">MP4, MOV, WebM, MKV, MP3, WAV, M4A — drop multiples</div>
+            </div>
+            <input type="file" class="file-input-hidden" id="fileInput" accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.mp3,.wav,.m4a,.ogg,.flac" multiple>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls-bar">
+            <div class="checkbox-group">
+                <label class="cb-pill" id="pillTranscribe">
+                    <input type="checkbox" id="cbTranscribe" checked>
+                    <span class="cb-text">Transcribe</span>
+                </label>
+                <label class="cb-pill" id="pillDownload">
+                    <input type="checkbox" id="cbDownload">
+                    <span class="cb-text">Download</span>
+                </label>
+            </div>
+            <select class="model-select" id="modelSelect">
+                <option value="tiny">⚡ Tiny — fastest</option>
+                <option value="base" selected>⚖️ Base — recommended</option>
+                <option value="small">🎯 Small — more accurate</option>
+                <option value="medium">🔬 Medium — best accuracy</option>
+            </select>
+        </div>
+
+        <div class="section-divider"></div>
+
+        <!-- Queue -->
+        <div class="queue-header" id="queueHeader" style="display:none;">
+            <div class="queue-title">Queue</div>
+            <button class="clear-btn" onclick="clearDone()">Clear finished</button>
+        </div>
+
+        <div id="queueContainer">
+            <div class="queue-empty">
+                <div class="empty-icon">⌘</div>
+                Add URLs or drop files above to start
+            </div>
+        </div>
+
+        <div class="footer">Runs locally via <span>Whisper</span> + <span>yt-dlp</span> — your data never leaves your machine</div>
+    </div>
+
+    <script>
+        // ─── Prefs persistence ───
+        const PREFS_KEY = 'videomasa_prefs';
+
+        function loadPrefs() {
+            try {
+                const s = localStorage.getItem(PREFS_KEY);
+                if (s) {
+                    const p = JSON.parse(s);
+                    if (typeof p.transcribe === 'boolean') document.getElementById('cbTranscribe').checked = p.transcribe;
+                    if (typeof p.download === 'boolean') document.getElementById('cbDownload').checked = p.download;
+                    if (p.model) document.getElementById('modelSelect').value = p.model;
+                }
+            } catch(e) {}
+            updatePills();
+        }
+
+        function savePrefs() {
+            localStorage.setItem(PREFS_KEY, JSON.stringify({
+                transcribe: document.getElementById('cbTranscribe').checked,
+                download: document.getElementById('cbDownload').checked,
+                model: document.getElementById('modelSelect').value
+            }));
+            updatePills();
+        }
+
+        function updatePills() {
+            const t = document.getElementById('cbTranscribe').checked;
+            const d = document.getElementById('cbDownload').checked;
+            document.getElementById('pillTranscribe').classList.toggle('active-transcribe', t);
+            document.getElementById('pillDownload').classList.toggle('active-download', d);
+        }
+
+        document.getElementById('cbTranscribe').addEventListener('change', savePrefs);
+        document.getElementById('cbDownload').addEventListener('change', savePrefs);
+        document.getElementById('modelSelect').addEventListener('change', savePrefs);
+        loadPrefs();
+
+        // ─── Drop zone ───
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            handleFiles(e.dataTransfer.files);
+        });
+        fileInput.addEventListener('change', () => { handleFiles(fileInput.files); fileInput.value = ''; });
+
+        function handleFiles(files) {
+            for (const file of files) {
+                addFileJob(file);
+            }
+        }
+
+        // ─── Job queue ───
+        let jobQueue = [];
+        const urlInput = document.getElementById('urlInput');
+        urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addJob(); });
+
+        function makeLabel(url) {
+            try {
+                const u = new URL(url);
+                const p = u.pathname.replace(/\/$/, '');
+                return u.hostname.replace('www.', '') + (p.length > 35 ? p.slice(0, 35) + '…' : p);
+            } catch(e) { return url; }
+        }
+
+        async function addJob() {
+            const url = urlInput.value.trim();
+            if (!url) return;
+
+            const doT = document.getElementById('cbTranscribe').checked;
+            const doD = document.getElementById('cbDownload').checked;
+            const model = document.getElementById('modelSelect').value;
+
+            if (!doT && !doD) {
+                document.getElementById('pillTranscribe').style.animation = 'shake 0.4s ease';
+                document.getElementById('pillDownload').style.animation = 'shake 0.4s ease';
+                setTimeout(() => {
+                    document.getElementById('pillTranscribe').style.animation = '';
+                    document.getElementById('pillDownload').style.animation = '';
+                }, 500);
+                return;
+            }
+
+            urlInput.value = '';
+
+            // Check for duplicate URL in active jobs — merge if found
+            const existing = jobQueue.find(j => j.url && j.url === url && j.status !== 'done' && j.status !== 'error');
+            if (existing) {
+                const addTranscribe = doT && !existing.doTranscribe;
+                const addDownload = doD && !existing.doDownload;
+
+                if (addTranscribe || addDownload) {
+                    try {
+                        const resp = await fetch(`/merge/${existing.id}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ transcribe: addTranscribe, download: addDownload, model })
+                        });
+                        const data = await resp.json();
+                        if (data.error) { alert(data.error); return; }
+
+                        if (addTranscribe) existing.doTranscribe = true;
+                        if (addDownload) existing.doDownload = true;
+                        if (data.download_ready) {
+                            existing.downloadReady = true;
+                            existing.filename = data.filename || existing.filename;
+                        }
+                        existing.merged = true;
+
+                        // Move to top of queue
+                        const idx = jobQueue.indexOf(existing);
+                        if (idx > 0) {
+                            jobQueue.splice(idx, 1);
+                            jobQueue.unshift(existing);
+                        }
+                        renderQueue();
+                    } catch(e) { alert('Merge failed: ' + e.message); }
+                }
+                return;
+            }
+
+            // Normal flow — create new job
+            try {
+                const resp = await fetch('/process', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, model, transcribe: doT, download: doD })
+                });
+                const data = await resp.json();
+                if (data.error) { alert(data.error); return; }
+
+                const job = {
+                    id: data.job_id, label: makeLabel(url), url,
+                    doTranscribe: doT, doDownload: doD,
+                    status: 'queued', message: 'Queued...',
+                    transcript: '', timestamped: '',
+                    downloadReady: false, filename: '',
+                    title: '', merged: false,
+                    showTimestamped: false
+                };
+                jobQueue.unshift(job);
+                renderQueue();
+                pollJob(job);
+            } catch(e) { alert('Failed: ' + e.message); }
+        }
+
+        async function addFileJob(file) {
+            const doT = document.getElementById('cbTranscribe').checked;
+            const doD = document.getElementById('cbDownload').checked;
+            const model = document.getElementById('modelSelect').value;
+
+            if (!doT && !doD) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('model', model);
+            formData.append('transcribe', doT);
+            formData.append('download', doD);
+
+            try {
+                const resp = await fetch('/upload', { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (data.error) { alert(data.error); return; }
+
+                const job = {
+                    id: data.job_id, label: file.name, url: '',
+                    doTranscribe: doT, doDownload: doD,
+                    status: 'queued', message: 'Queued...',
+                    transcript: '', timestamped: '',
+                    downloadReady: false, filename: '',
+                    title: '', merged: false,
+                    showTimestamped: false
+                };
+                jobQueue.unshift(job);
+                renderQueue();
+                pollJob(job);
+            } catch(e) { alert('Upload failed: ' + e.message); }
+        }
+
+        // ─── Polling (targeted updates to avoid flicker) ───
+        function pollJob(job) {
+            const iv = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/status/${job.id}`);
+                    const data = await resp.json();
+
+                    const prevStatus = job.status;
+                    const prevDownloadReady = job.downloadReady;
+                    const hadTitle = !!job.title;
+
+                    job.status = data.status;
+                    job.message = data.message;
+                    job.transcript = data.transcript || '';
+                    job.timestamped = data.timestamped || '';
+                    job.downloadReady = data.download_ready || false;
+                    job.filename = data.filename || '';
+                    job.title = data.title || job.title;
+
+                    // Structural change (status transition, download ready, title appeared) → full re-render
+                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || (job.title && !hadTitle)) {
+                        renderQueue();
+                    } else {
+                        // Steady state → only update the message text in-place
+                        updateJobCard(job);
+                    }
+
+                    if (data.status === 'done' || data.status === 'error') clearInterval(iv);
+                } catch(e) { clearInterval(iv); }
+            }, 1200);
+        }
+
+        function updateJobCard(job) {
+            const card = document.getElementById(`job-${job.id}`);
+            if (!card) return;
+            const msgEl = card.querySelector('.job-msg');
+            if (msgEl) msgEl.textContent = job.message;
+        }
+
+        // ─── Render ───
+        function renderQueue() {
+            const container = document.getElementById('queueContainer');
+            const header = document.getElementById('queueHeader');
+
+            if (jobQueue.length === 0) {
+                container.innerHTML = '<div class="queue-empty"><div class="empty-icon">⌘</div>Add URLs or drop files above to start</div>';
+                header.style.display = 'none';
+                return;
+            }
+
+            header.style.display = 'flex';
+
+            container.innerHTML = jobQueue.map((job, idx) => {
+                let dotClass = 'dot-queued';
+                let statusClass = '';
+                if (job.status === 'downloading') dotClass = 'dot-downloading';
+                if (job.status === 'transcribing') dotClass = 'dot-transcribing';
+                if (job.status === 'done') { dotClass = 'dot-done'; statusClass = 'status-done'; }
+                if (job.status === 'error') { dotClass = 'dot-error'; statusClass = 'status-error'; }
+
+                let badges = '';
+                if (job.doTranscribe) badges += '<span class="badge badge-t">Transcribe</span>';
+                if (job.doDownload) badges += '<span class="badge badge-d">Download</span>';
+                if (job.merged) badges += '<span class="badge badge-merged">Merged</span>';
+
+                const titleHTML = job.title ? `<div class="job-title">${esc(job.title)}</div>` : '';
+
+                // Download section: available as soon as file is ready (don't wait for transcription)
+                let sections = '';
+
+                if (job.downloadReady) {
+                    sections += `
+                        <div class="result-block">
+                            <div class="result-header">
+                                <span class="result-title">File Ready</span>
+                                <a class="dl-btn" href="/download/${job.id}" download="${esc(job.filename)}">↓ ${esc(job.filename)}</a>
+                            </div>
+                        </div>`;
+                }
+
+                // Transcript section: only when fully done
+                if (job.status === 'done' && job.doTranscribe && job.transcript) {
+                    const bodyContent = job.showTimestamped ? job.timestamped : job.transcript;
+                    const toggleLabel = job.showTimestamped ? 'Plain' : 'Timestamps';
+                    sections += `
+                        <div class="result-block">
+                            <div class="result-header">
+                                <span class="result-title">Transcript</span>
+                                <div class="action-row">
+                                    <button class="toggle-ts" onclick="toggleTs(${idx})">${toggleLabel}</button>
+                                    <button class="copy-btn" onclick="copyText('${job.id}', this)">Copy</button>
+                                </div>
+                            </div>
+                            <div class="result-body ${job.showTimestamped ? 'mono' : ''}" id="result_${job.id}">${esc(bodyContent)}</div>
+                        </div>`;
+                }
+
+                const resultsHTML = sections ? `<div class="job-results">${sections}</div>` : '';
+
+                return `
+                    <div class="job-card ${statusClass}" id="job-${job.id}">
+                        <div class="job-top">
+                            <div class="job-label" title="${esc(job.url || job.label)}">${esc(job.label)}</div>
+                            <div class="job-badges">${badges}</div>
+                        </div>
+                        ${titleHTML}
+                        <div class="job-status">
+                            <div class="dot ${dotClass}"></div>
+                            <span class="job-msg">${esc(job.message)}</span>
+                        </div>
+                        ${resultsHTML}
+                    </div>`;
+            }).join('');
+        }
+
+        function toggleTs(idx) {
+            jobQueue[idx].showTimestamped = !jobQueue[idx].showTimestamped;
+            renderQueue();
+        }
+
+        function copyText(jobId, btn) {
+            const el = document.getElementById(`result_${jobId}`);
+            if (!el) return;
+            navigator.clipboard.writeText(el.textContent).then(() => {
+                const prev = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.style.color = 'var(--lime)';
+                btn.style.borderColor = 'var(--lime)';
+                setTimeout(() => { btn.textContent = prev; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
+            });
+        }
+
+        function clearDone() {
+            jobQueue = jobQueue.filter(j => j.status !== 'done' && j.status !== 'error');
+            renderQueue();
+        }
+
+        function esc(str) {
+            const d = document.createElement('div');
+            d.textContent = str;
+            return d.innerHTML;
+        }
+    </script>
+</body>
+</html>
