@@ -132,6 +132,12 @@
             animation: fadeUp 0.6s ease 0.1s both;
         }
 
+        .section-label-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 12px;
+        }
         .section-label {
             font-family: 'JetBrains Mono', monospace;
             font-size: 10px;
@@ -139,7 +145,21 @@
             letter-spacing: 2px;
             text-transform: uppercase;
             color: var(--text-dim);
-            margin-bottom: 12px;
+        }
+        .resolved-name {
+            font-size: 12px;
+            color: var(--blue);
+            font-weight: 400;
+            opacity: 0;
+            transition: opacity 0.4s ease;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 60%;
+            text-align: right;
+        }
+        .resolved-name.visible {
+            opacity: 1;
         }
 
         .input-row {
@@ -243,19 +263,14 @@
             display: none;
         }
 
-        /* ─── Controls Bar ─── */
-        .controls-bar {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 32px;
-            flex-wrap: wrap;
-            animation: fadeUp 0.6s ease 0.2s both;
-        }
-
         .checkbox-group {
             display: flex;
+            align-items: center;
             gap: 4px;
+            margin-top: 14px;
+        }
+        .checkbox-group .model-select {
+            margin-left: auto;
         }
         .cb-pill {
             display: flex;
@@ -334,7 +349,6 @@
             color: var(--text-dim);
             outline: none;
             cursor: pointer;
-            margin-left: auto;
             transition: border-color 0.2s;
         }
         .model-select:hover { border-color: var(--border-hover); }
@@ -407,6 +421,28 @@
             to { opacity: 1; transform: translateY(0) scale(1); }
         }
 
+        .job-card-inner {
+            display: flex;
+            gap: 14px;
+            align-items: flex-start;
+        }
+        .job-thumb {
+            width: 72px;
+            height: 48px;
+            border-radius: var(--radius-xs);
+            object-fit: cover;
+            flex-shrink: 0;
+            background: var(--surface-2);
+            opacity: 0;
+            animation: fadeIn 0.3s ease forwards;
+        }
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+        .job-card-content {
+            flex: 1;
+            min-width: 0;
+        }
         .job-top {
             display: flex;
             align-items: center;
@@ -500,6 +536,12 @@
             color: var(--text-faint);
         }
         .action-row { display: flex; gap: 6px; }
+        .action-row-bar {
+            display: flex;
+            justify-content: flex-end;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
 
         .copy-btn, .dl-btn, .toggle-ts {
             background: var(--surface-3);
@@ -565,12 +607,221 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        /* ─── Thumbnail Lightbox ─── */
+        .thumb-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.85);
+            z-index: 9000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            cursor: pointer;
+        }
+        .thumb-overlay.open {
+            opacity: 1;
+            pointer-events: auto;
+        }
+        .thumb-overlay-inner {
+            position: relative;
+            max-width: 90vw;
+            max-height: 80vh;
+            cursor: default;
+        }
+        .thumb-overlay-img {
+            display: block;
+            max-width: 90vw;
+            max-height: 80vh;
+            border-radius: var(--radius);
+            object-fit: contain;
+            box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+        }
+        .thumb-overlay-close {
+            position: absolute;
+            top: -12px;
+            right: -12px;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            color: var(--text-mid);
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+            line-height: 1;
+        }
+        .thumb-overlay-close:hover {
+            background: var(--surface-3);
+            color: var(--text);
+            border-color: var(--border-hover);
+        }
+        .thumb-overlay-dl {
+            position: absolute;
+            bottom: -14px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--surface-2);
+            border: 1px solid var(--blue-dim);
+            border-radius: 100px;
+            padding: 5px 14px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--blue);
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            transition: all 0.15s;
+        }
+        .thumb-overlay-dl:hover {
+            border-color: var(--blue);
+            background: #5eadff0a;
+        }
+
+        /* Clickable thumbnail */
+        .job-thumb {
+            cursor: pointer;
+            transition: opacity 0.15s;
+        }
+        .job-thumb:hover {
+            opacity: 0.8 !important;
+        }
+
+        /* ─── Transcript Working State ─── */
+        .transcript-working {
+            color: var(--text-faint);
+            font-size: 13px;
+            font-style: italic;
+            padding: 20px 16px;
+            text-align: center;
+        }
+        .transcript-working-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--amber);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .transcript-working-label .dot {
+            background: var(--amber);
+            animation: blink 1s ease infinite;
+        }
+
+        /* ─── Model Badge & Dropdown ─── */
+        .model-badge-wrap {
+            position: relative;
+            display: inline-flex;
+        }
+        .model-badge {
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 4px 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: all 0.15s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .model-badge:hover {
+            border-color: var(--border-hover);
+            color: var(--text-mid);
+        }
+        .model-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 6px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 4px;
+            z-index: 100;
+            min-width: 180px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        .model-dropdown.open { display: block; }
+        .model-dropdown-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            padding: 8px 12px;
+            background: none;
+            border: none;
+            font-family: 'Outfit', sans-serif;
+            font-size: 12px;
+            color: var(--text-mid);
+            cursor: pointer;
+            border-radius: var(--radius-xs);
+            text-align: left;
+            transition: all 0.1s;
+        }
+        .model-dropdown-item:hover { background: var(--surface-3); color: var(--text); }
+        .model-dropdown-item.done { color: var(--text-dim); }
+        .model-dropdown-item .check { color: var(--lime); font-size: 11px; }
+        .model-dropdown-item .working { color: var(--amber); font-size: 10px; }
+        .model-dropdown-item:disabled {
+            opacity: 0.5;
+            cursor: default;
+        }
+
+        /* ─── Transcript Tabs ─── */
+        .transcript-tabs {
+            display: flex;
+            gap: 2px;
+            margin-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+        .transcript-tab {
+            background: none;
+            border: none;
+            border-bottom: 2px solid transparent;
+            padding: 6px 14px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-faint);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .transcript-tab:hover { color: var(--text-mid); }
+        .transcript-tab.active {
+            color: var(--lime);
+            border-bottom-color: var(--lime);
+        }
+        .transcript-tab.tab-working {
+            color: var(--amber);
+        }
+        .transcript-tab.tab-working.active {
+            border-bottom-color: var(--amber);
+        }
+
         /* ─── Responsive ─── */
         @media (max-width: 540px) {
             .app { padding: 36px 16px 80px; }
             .main-card { padding: 20px; }
-            .controls-bar { gap: 8px; }
-            .model-select { margin-left: 0; width: 100%; margin-top: 4px; }
+            .checkbox-group { flex-wrap: wrap; }
+            .checkbox-group .model-select { margin-left: 0; width: 100%; margin-top: 4px; }
             .input-row { flex-direction: column; }
             .add-btn { padding: 14px; border-radius: var(--radius); }
         }
@@ -578,6 +829,15 @@
 </head>
 <body>
     <div class="glow-orb"></div>
+
+    <!-- Thumbnail Lightbox -->
+    <div class="thumb-overlay" id="thumbOverlay" onclick="closeThumb(event)">
+        <div class="thumb-overlay-inner">
+            <button class="thumb-overlay-close" onclick="closeThumb(event, true)">&times;</button>
+            <img class="thumb-overlay-img" id="thumbOverlayImg" src="" alt="Thumbnail">
+            <a class="thumb-overlay-dl" id="thumbOverlayDl" href="" download="">&#8595; Save thumbnail</a>
+        </div>
+    </div>
 
     <div class="app">
         <!-- Header -->
@@ -590,12 +850,32 @@
 
         <!-- Main Input Card -->
         <div class="main-card">
-            <div class="section-label">Add Video URL</div>
+            <div class="section-label-row">
+                <div class="section-label">Add Video URL</div>
+                <div class="resolved-name" id="resolvedName"></div>
+            </div>
             <div class="input-row">
                 <input type="text" class="url-input" id="urlInput"
                     placeholder="Paste a YouTube, Instagram, TikTok, or any video URL"
                     spellcheck="false" autocomplete="off">
                 <button class="add-btn" id="addBtn" onclick="addJob()">+ Add</button>
+            </div>
+
+            <div class="checkbox-group">
+                <label class="cb-pill" id="pillTranscribe">
+                    <input type="checkbox" id="cbTranscribe" checked>
+                    <span class="cb-text">Transcribe</span>
+                </label>
+                <label class="cb-pill" id="pillDownload">
+                    <input type="checkbox" id="cbDownload">
+                    <span class="cb-text">Download</span>
+                </label>
+                <select class="model-select" id="modelSelect">
+                    <option value="tiny">⚡ Tiny — fastest</option>
+                    <option value="base" selected>⚖️ Base — recommended</option>
+                    <option value="small">🎯 Small — more accurate</option>
+                    <option value="medium">🔬 Medium — best accuracy</option>
+                </select>
             </div>
 
             <div class="or-divider">
@@ -610,26 +890,6 @@
                 <div class="drop-hint">MP4, MOV, WebM, MKV, MP3, WAV, M4A — drop multiples</div>
             </div>
             <input type="file" class="file-input-hidden" id="fileInput" accept="video/*,audio/*,.mp4,.mov,.webm,.mkv,.mp3,.wav,.m4a,.ogg,.flac" multiple>
-        </div>
-
-        <!-- Controls -->
-        <div class="controls-bar">
-            <div class="checkbox-group">
-                <label class="cb-pill" id="pillTranscribe">
-                    <input type="checkbox" id="cbTranscribe" checked>
-                    <span class="cb-text">Transcribe</span>
-                </label>
-                <label class="cb-pill" id="pillDownload">
-                    <input type="checkbox" id="cbDownload">
-                    <span class="cb-text">Download</span>
-                </label>
-            </div>
-            <select class="model-select" id="modelSelect">
-                <option value="tiny">⚡ Tiny — fastest</option>
-                <option value="base" selected>⚖️ Base — recommended</option>
-                <option value="small">🎯 Small — more accurate</option>
-                <option value="medium">🔬 Medium — best accuracy</option>
-            </select>
         </div>
 
         <div class="section-divider"></div>
@@ -710,8 +970,21 @@
 
         // ─── Job queue ───
         let jobQueue = [];
+        let currentInputJobId = null;
         const urlInput = document.getElementById('urlInput');
+        const resolvedName = document.getElementById('resolvedName');
         urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addJob(); });
+        urlInput.addEventListener('paste', () => { setTimeout(() => addJob(), 0); });
+        urlInput.addEventListener('focus', () => { urlInput.select(); });
+        urlInput.addEventListener('input', () => { if (!urlInput.value.trim()) hideResolvedName(); });
+
+        function showResolvedName(title) {
+            resolvedName.textContent = `(${title})`;
+            resolvedName.classList.add('visible');
+        }
+        function hideResolvedName() {
+            resolvedName.classList.remove('visible');
+        }
 
         function makeLabel(url) {
             try {
@@ -738,8 +1011,6 @@
                 }, 500);
                 return;
             }
-
-            urlInput.value = '';
 
             // Check for duplicate URL in active jobs — merge if found
             const existing = jobQueue.find(j => j.url && j.url === url && j.status !== 'done' && j.status !== 'error');
@@ -793,10 +1064,13 @@
                     status: 'queued', message: 'Queued...',
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
-                    title: '', merged: false,
-                    showTimestamped: false
+                    title: '', thumbnail: '', merged: false,
+                    showTimestamped: {},
+                    model: model, transcripts: {}, activeTab: model
                 };
                 jobQueue.unshift(job);
+                currentInputJobId = job.id;
+                hideResolvedName();
                 renderQueue();
                 pollJob(job);
             } catch(e) { alert('Failed: ' + e.message); }
@@ -827,7 +1101,8 @@
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
                     title: '', merged: false,
-                    showTimestamped: false
+                    showTimestamped: {},
+                    model: model, transcripts: {}, activeTab: model
                 };
                 jobQueue.unshift(job);
                 renderQueue();
@@ -844,7 +1119,9 @@
 
                     const prevStatus = job.status;
                     const prevDownloadReady = job.downloadReady;
+                    const prevFileStatus = job.fileStatus;
                     const hadTitle = !!job.title;
+                    const hadThumb = !!job.thumbnail;
 
                     job.status = data.status;
                     job.message = data.message;
@@ -853,9 +1130,17 @@
                     job.downloadReady = data.download_ready || false;
                     job.filename = data.filename || '';
                     job.title = data.title || job.title;
+                    job.thumbnail = data.thumbnail || job.thumbnail;
+                    job.fileStatus = data.file_status || job.fileStatus;
+                    if (data.transcripts) job.transcripts = data.transcripts;
 
-                    // Structural change (status transition, download ready, title appeared) → full re-render
-                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || (job.title && !hadTitle)) {
+                    // Show resolved title near input if this is the current input job
+                    if (job.title && !hadTitle && job.id === currentInputJobId) {
+                        showResolvedName(job.title);
+                    }
+
+                    // Structural change (status transition, download ready, title/thumbnail appeared) → full re-render
+                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || job.fileStatus !== prevFileStatus || (job.title && !hadTitle) || (job.thumbnail && !hadThumb)) {
                         renderQueue();
                     } else {
                         // Steady state → only update the message text in-place
@@ -871,10 +1156,10 @@
             const card = document.getElementById(`job-${job.id}`);
             if (!card) return;
             const msgEl = card.querySelector('.job-msg');
-            if (msgEl) msgEl.textContent = job.message;
+            if (msgEl) msgEl.textContent = 'Status: ' + job.message;
         }
 
-        // ─── Render ───
+        // ─── Render (DOM-persistent: card + content wrapper isolate ::before from reflows) ───
         function renderQueue() {
             const container = document.getElementById('queueContainer');
             const header = document.getElementById('queueHeader');
@@ -887,22 +1172,60 @@
 
             header.style.display = 'flex';
 
-            container.innerHTML = jobQueue.map((job, idx) => {
+            // Remove empty state if present
+            const emptyEl = container.querySelector('.queue-empty');
+            if (emptyEl) emptyEl.remove();
+
+            // Remove cards no longer in queue
+            const desiredIds = new Set(jobQueue.map(j => j.id));
+            container.querySelectorAll('.job-card').forEach(el => {
+                if (!desiredIds.has(el.id.slice(4))) el.remove();
+            });
+
+            // Create or update each card
+            for (let idx = 0; idx < jobQueue.length; idx++) {
+                const job = jobQueue[idx];
+                let card = document.getElementById(`job-${job.id}`);
+                const isNew = !card;
+
+                // ── Compute status ──
                 let dotClass = 'dot-queued';
                 let statusClass = '';
-                if (job.status === 'downloading') dotClass = 'dot-downloading';
-                if (job.status === 'transcribing') dotClass = 'dot-transcribing';
+                if (job.status === 'downloading') { dotClass = 'dot-downloading'; }
+                if (job.status === 'transcribing') { dotClass = 'dot-transcribing'; }
                 if (job.status === 'done') { dotClass = 'dot-done'; statusClass = 'status-done'; }
                 if (job.status === 'error') { dotClass = 'dot-error'; statusClass = 'status-error'; }
 
+                // ── Create card element if new ──
+                if (isNew) {
+                    card = document.createElement('div');
+                    card.id = `job-${job.id}`;
+                    card.className = `job-card ${statusClass}`;
+                } else {
+                    card.style.animation = 'none';
+                    card.className = `job-card ${statusClass}`;
+                }
+
+                // Get or create the content wrapper.
+                // innerHTML is ONLY ever set on this wrapper, never on the card itself,
+                // so the card's ::before pseudo-element and its animation are never disrupted.
+                let cardBody = card.querySelector('.job-card-body');
+                if (!cardBody) {
+                    cardBody = document.createElement('div');
+                    cardBody.className = 'job-card-body';
+                    card.appendChild(cardBody);
+                }
+
+                // ── Preserve existing thumbnail element to avoid flicker ──
+                const existingThumb = cardBody.querySelector('.job-thumb');
+
+                // ── Build badges ──
                 let badges = '';
                 if (job.doTranscribe) badges += '<span class="badge badge-t">Transcribe</span>';
                 if (job.doDownload) badges += '<span class="badge badge-d">Download</span>';
                 if (job.merged) badges += '<span class="badge badge-merged">Merged</span>';
 
-                const titleHTML = job.title ? `<div class="job-title">${esc(job.title)}</div>` : '';
-
-                // Download section: available as soon as file is ready (don't wait for transcription)
+                // ── Build sections ──
                 let sections = '';
 
                 if (job.downloadReady) {
@@ -910,53 +1233,130 @@
                         <div class="result-block">
                             <div class="result-header">
                                 <span class="result-title">File Ready</span>
-                                <a class="dl-btn" href="/download/${job.id}" download="${esc(job.filename)}">↓ ${esc(job.filename)}</a>
+                                <button class="dl-btn" onclick="autoDownload('${job.id}', '${esc(job.filename)}')">&#8595; ${esc(job.filename)}</button>
                             </div>
                         </div>`;
                 }
 
-                // Transcript section: only when fully done
-                if (job.status === 'done' && job.doTranscribe && job.transcript) {
-                    const bodyContent = job.showTimestamped ? job.timestamped : job.transcript;
-                    const toggleLabel = job.showTimestamped ? 'Plain' : 'Timestamps';
-                    sections += `
-                        <div class="result-block">
-                            <div class="result-header">
-                                <span class="result-title">Transcript</span>
-                                <div class="action-row">
-                                    <button class="toggle-ts" onclick="toggleTs(${idx})">${toggleLabel}</button>
-                                    <button class="copy-btn" onclick="copyText('${job.id}', this)">Copy</button>
-                                </div>
+                if (job.doTranscribe) {
+                    const tModels = Object.keys(job.transcripts || {});
+                    const activeModel = job.activeTab || job.model;
+                    const activeEntry = (job.transcripts || {})[activeModel];
+                    const hasMultiple = tModels.length > 1;
+
+                    let tabsHTML = '';
+                    if (hasMultiple) {
+                        tabsHTML = '<div class="transcript-tabs">' + tModels.map(m => {
+                            const e = job.transcripts[m];
+                            const isActive = m === activeModel;
+                            const isWorking = e.status === 'transcribing';
+                            return `<button class="transcript-tab ${isActive ? 'active' : ''} ${isWorking ? 'tab-working' : ''}" onclick="switchTab(${idx}, '${m}')">${mName(m)}${isWorking ? '...' : ''}</button>`;
+                        }).join('') + '</div>';
+                    }
+
+                    const fileGone = job.fileStatus === 'cleaned';
+                    const modelDropdownHTML = `
+                        <div class="model-badge-wrap">
+                            <button class="model-badge" onclick="toggleModelDropdown(event, ${idx})">${mName(activeModel)}</button>
+                            <div class="model-dropdown" id="model-dropdown-${idx}">
+                                ${['tiny', 'base', 'small', 'medium'].map(m => {
+                                    const entry = (job.transcripts || {})[m];
+                                    const done = entry && entry.status === 'done';
+                                    const working = entry && entry.status === 'transcribing';
+                                    const disabled = working || (fileGone && !done);
+                                    const tooltip = (fileGone && !done) ? 'File cleaned up — resubmit URL to use this model' : '';
+                                    return `<button class="model-dropdown-item ${done ? 'done' : ''}" onclick="retranscribeModel(${idx}, '${m}')" ${disabled ? 'disabled' : ''} title="${tooltip}">${mEmoji(m)} ${mName(m)}${done ? ' <span class=check>✓</span>' : ''}${working ? ' <span class=working>···</span>' : ''}</button>`;
+                                }).join('')}
                             </div>
-                            <div class="result-body ${job.showTimestamped ? 'mono' : ''}" id="result_${job.id}">${esc(bodyContent)}</div>
                         </div>`;
+
+                    if (activeEntry && activeEntry.status === 'done' && activeEntry.transcript) {
+                        const isTs = (job.showTimestamped || {})[activeModel];
+                        const bodyContent = isTs ? activeEntry.timestamped : activeEntry.transcript;
+                        const toggleLabel = isTs ? 'Plain' : 'Timestamps';
+                        sections += `
+                            <div class="result-block">
+                                <div class="result-header">
+                                    <span class="result-title">Transcript</span>
+                                </div>
+                                ${tabsHTML}
+                                <div class="action-row-bar">
+                                    <button class="toggle-ts" onclick="toggleTs(${idx}, '${activeModel}')">${toggleLabel}</button>
+                                    <button class="copy-btn" onclick="copyText('${job.id}_${activeModel}', this)">Copy</button>
+                                    ${modelDropdownHTML}
+                                </div>
+                                <div class="result-body ${isTs ? 'mono' : ''}" id="result_${job.id}_${activeModel}">${esc(bodyContent)}</div>
+                            </div>`;
+                    } else if (activeEntry && activeEntry.status === 'transcribing') {
+                        sections += `
+                            <div class="result-block">
+                                <div class="result-header">
+                                    <span class="transcript-working-label"><span class="dot dot-transcribing"></span>Transcribing Audio...</span>
+                                </div>
+                                ${tabsHTML}
+                                ${tModels.some(m => job.transcripts[m].status === 'done') ? '<div class="action-row-bar">' + modelDropdownHTML + '</div>' : ''}
+                                <div class="result-body">
+                                    <div class="transcript-working">Working...</div>
+                                </div>
+                            </div>`;
+                    } else if (tModels.length === 0 && job.status !== 'done' && job.status !== 'error') {
+                        const isTranscribing = job.status === 'transcribing';
+                        const headerLabel = isTranscribing
+                            ? '<span class="transcript-working-label"><span class="dot dot-transcribing"></span>Transcribing Audio...</span>'
+                            : '<span class="transcript-working-label"><span class="dot dot-queued"></span>Transcript</span>';
+                        sections += `
+                            <div class="result-block">
+                                <div class="result-header">${headerLabel}</div>
+                                <div class="result-body">
+                                    <div class="transcript-working">Working...</div>
+                                </div>
+                            </div>`;
+                    }
                 }
 
                 const resultsHTML = sections ? `<div class="job-results">${sections}</div>` : '';
 
-                return `
-                    <div class="job-card ${statusClass}" id="job-${job.id}">
-                        <div class="job-top">
-                            <div class="job-label" title="${esc(job.url || job.label)}">${esc(job.label)}</div>
-                            <div class="job-badges">${badges}</div>
+                const thumbHTML = job.thumbnail
+                    ? `<img class="job-thumb" src="${esc(job.thumbnail)}" alt="" loading="lazy" onclick="openThumb('${esc(job.thumbnail)}')">`
+                    : '';
+
+                // ── Update content wrapper only — card div is never touched ──
+                cardBody.innerHTML = `
+                    <div class="job-card-inner">
+                        ${thumbHTML}
+                        <div class="job-card-content">
+                            <div class="job-top">
+                                <div class="job-label" title="${esc(job.url || job.label)}">${esc(job.title || job.label)}</div>
+                                <div class="job-badges">${badges}</div>
+                            </div>
+                            ${job.title && job.url ? `<div class="job-title">${esc(job.label)}</div>` : ''}
+                            <div class="job-status">
+                                <div class="dot ${dotClass}"></div>
+                                <span class="job-msg">Status: ${esc(job.message)}</span>
+                            </div>
                         </div>
-                        ${titleHTML}
-                        <div class="job-status">
-                            <div class="dot ${dotClass}"></div>
-                            <span class="job-msg">${esc(job.message)}</span>
-                        </div>
-                        ${resultsHTML}
-                    </div>`;
-            }).join('');
+                    </div>
+                    ${resultsHTML}`;
+
+                // Restore preserved thumbnail so the img element is never recreated
+                if (existingThumb) {
+                    const newThumb = cardBody.querySelector('.job-thumb');
+                    if (newThumb) newThumb.replaceWith(existingThumb);
+                }
+
+                // appendChild moves existing nodes to correct position, or inserts new ones
+                container.appendChild(card);
+            }
         }
 
-        function toggleTs(idx) {
-            jobQueue[idx].showTimestamped = !jobQueue[idx].showTimestamped;
+        function toggleTs(idx, model) {
+            if (!jobQueue[idx].showTimestamped) jobQueue[idx].showTimestamped = {};
+            jobQueue[idx].showTimestamped[model] = !jobQueue[idx].showTimestamped[model];
             renderQueue();
         }
 
-        function copyText(jobId, btn) {
-            const el = document.getElementById(`result_${jobId}`);
+        function copyText(key, btn) {
+            const el = document.getElementById(`result_${key}`);
             if (!el) return;
             navigator.clipboard.writeText(el.textContent).then(() => {
                 const prev = btn.textContent;
@@ -968,7 +1368,14 @@
         }
 
         function clearDone() {
+            const removed = jobQueue.filter(j => j.status === 'done' || j.status === 'error');
             jobQueue = jobQueue.filter(j => j.status !== 'done' && j.status !== 'error');
+            // Clean up server files for cleared jobs
+            removed.forEach(j => {
+                if (j.fileStatus !== 'cleaned') {
+                    fetch(`/cleanup/${j.id}`, { method: 'POST' }).catch(() => {});
+                }
+            });
             renderQueue();
         }
 
@@ -976,6 +1383,139 @@
             const d = document.createElement('div');
             d.textContent = str;
             return d.innerHTML;
+        }
+
+        // ─── Model helpers ───
+        function mName(m) {
+            return { tiny: 'Tiny', base: 'Base', small: 'Small', medium: 'Medium' }[m] || m;
+        }
+        function mEmoji(m) {
+            return { tiny: '\u26A1', base: '\u2696\uFE0F', small: '\uD83C\uDFAF', medium: '\uD83D\uDD2C' }[m] || '';
+        }
+
+        // ─── Model dropdown ───
+        function toggleModelDropdown(e, jobIdx) {
+            e.stopPropagation();
+            const dropdown = document.getElementById(`model-dropdown-${jobIdx}`);
+            if (!dropdown) return;
+            const isOpen = dropdown.classList.contains('open');
+            document.querySelectorAll('.model-dropdown.open').forEach(d => d.classList.remove('open'));
+            if (!isOpen) dropdown.classList.add('open');
+        }
+
+        document.addEventListener('click', () => {
+            document.querySelectorAll('.model-dropdown.open').forEach(d => d.classList.remove('open'));
+        });
+
+        // ─── Re-transcribe with different model ───
+        async function retranscribeModel(jobIdx, model) {
+            document.querySelectorAll('.model-dropdown.open').forEach(d => d.classList.remove('open'));
+            const job = jobQueue[jobIdx];
+
+            if (!confirm(`Transcribe again using ${mName(model)}?`)) return;
+
+            try {
+                const resp = await fetch(`/retranscribe/${job.id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model })
+                });
+                const data = await resp.json();
+                if (data.error) { alert(data.error); return; }
+
+                // Add working entry and switch to that tab
+                if (!job.transcripts) job.transcripts = {};
+                job.transcripts[model] = { transcript: '', timestamped: '', status: 'transcribing' };
+                job.activeTab = model;
+                renderQueue();
+
+                // Poll for this retranscription
+                pollRetranscribe(job, model);
+            } catch(e) { alert('Failed: ' + e.message); }
+        }
+
+        function pollRetranscribe(job, model) {
+            let prevStatus = (job.transcripts[model] || {}).status;
+            const iv = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/status/${job.id}`);
+                    const data = await resp.json();
+                    if (data.transcripts) job.transcripts = data.transcripts;
+
+                    const entry = job.transcripts[model];
+                    const currentStatus = entry ? entry.status : null;
+
+                    if (entry && (entry.status === 'done' || entry.status === 'error')) {
+                        clearInterval(iv);
+                    }
+
+                    // Only re-render when the status actually changed
+                    if (currentStatus !== prevStatus) {
+                        prevStatus = currentStatus;
+                        renderQueue();
+                    }
+                } catch(e) { clearInterval(iv); }
+            }, 1200);
+        }
+
+        function switchTab(idx, model) {
+            jobQueue[idx].activeTab = model;
+            renderQueue();
+        }
+
+        // ─── Thumbnail lightbox ───
+        function openThumb(src) {
+            const overlay = document.getElementById('thumbOverlay');
+            const img = document.getElementById('thumbOverlayImg');
+            const dl = document.getElementById('thumbOverlayDl');
+            img.src = src;
+            dl.href = src;
+            dl.download = 'thumbnail.jpg';
+            overlay.classList.add('open');
+        }
+
+        function closeThumb(e, force) {
+            if (force || e.target === document.getElementById('thumbOverlay')) {
+                document.getElementById('thumbOverlay').classList.remove('open');
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                document.getElementById('thumbOverlay').classList.remove('open');
+            }
+        });
+
+        // ─── Auto-download (no save-as dialog) ───
+        function autoDownload(jobId, filename) {
+            fetch(`/download/${jobId}`)
+                .then(resp => {
+                    if (!resp.ok) throw new Error('File not available');
+                    return resp.blob();
+                })
+                .then(blob => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+
+                    // Server file is fully in browser memory — delete server copy
+                    fetch(`/cleanup/${jobId}`, { method: 'POST' })
+                        .then(() => {
+                            const job = jobQueue.find(j => j.id === jobId);
+                            if (job) {
+                                job.downloadReady = false;
+                                job.fileStatus = 'cleaned';
+                                renderQueue();
+                            }
+                        })
+                        .catch(() => {}); // Cleanup failure is non-critical
+                })
+                .catch(err => alert('Download failed: ' + err.message));
         }
     </script>
 </body>
