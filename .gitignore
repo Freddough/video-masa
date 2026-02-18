@@ -33,3 +33,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Bundled binaries (downloaded separately, not committed)
+packaging/macos/ffmpeg
+packaging/windows/ffmpeg.exe
