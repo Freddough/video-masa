@@ -39,20 +39,28 @@ WORK_DIR.mkdir(exist_ok=True)
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
 jobs = {}
 
+# Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 90s
+import time
+_last_heartbeat = time.time()
+_HEARTBEAT_TIMEOUT = 90  # seconds
+
 
 def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_download: bool):
     """Background worker: download video, optionally transcribe, optionally keep file for download."""
     job = jobs[job_id]
 
     try:
-        # Grab thumbnail URL (quick metadata-only call, no file saved)
+        # Download thumbnail locally (remote CDN URLs expire/get blocked)
         try:
-            thumb_result = subprocess.run(
-                ["yt-dlp", "--get-thumbnail", "--no-playlist", url],
+            thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
+            subprocess.run(
+                ["yt-dlp", "--no-playlist", "--write-thumbnail",
+                 "--skip-download", "--convert-thumbnails", "jpg",
+                 "-o", str(WORK_DIR / f"{job_id}_thumb"), url],
                 capture_output=True, text=True, timeout=15
             )
-            if thumb_result.returncode == 0 and thumb_result.stdout.strip():
-                job["thumbnail"] = thumb_result.stdout.strip()
+            if thumb_path.exists():
+                job["thumbnail"] = f"/thumb/{job_id}"
         except Exception:
             pass  # thumbnail is optional, don't block the job
 
@@ -719,10 +727,34 @@ def shutdown():
     return jsonify({"ok": True})
 
 
+@app.route("/heartbeat", methods=["POST"])
+def heartbeat():
+    """Browser pings this every 30s. If no ping for 90s, server auto-shuts down."""
+    global _last_heartbeat
+    _last_heartbeat = time.time()
+    return jsonify({"ok": True})
+
+
+def _heartbeat_watchdog():
+    """Background thread: check heartbeat, shut down if browser tab is gone."""
+    while True:
+        time.sleep(30)
+        if time.time() - _last_heartbeat > _HEARTBEAT_TIMEOUT:
+            print("\nNo browser heartbeat for 90s — shutting down.")
+            cleanup_downloads_dir()
+            os.kill(os.getpid(), signal.SIGTERM)
+            break
+
+
 if __name__ == "__main__":
+    # Clean up any leftover files from a previous un-clean shutdown
+    cleanup_downloads_dir()
     port = int(os.environ.get("VIDEOMASA_PORT", 8080))
     if os.environ.get("VIDEOMASA_OPEN_BROWSER", "").lower() in ("1", "true", "yes"):
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+    # Start heartbeat watchdog — auto-shuts down if browser tab is closed
+    watchdog = threading.Thread(target=_heartbeat_watchdog, daemon=True)
+    watchdog.start()
     print("\n" + "=" * 52)
     print(f"  VIDEO TOOL running at http://localhost:{port}")
     print("=" * 52 + "\n")

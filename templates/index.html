@@ -74,8 +74,29 @@
 
         /* ─── Header ─── */
         .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
             margin-bottom: 28px;
             animation: fadeUp 0.6s ease both;
+        }
+        .quit-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 7px 16px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-faint);
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-top: 6px;
+        }
+        .quit-btn:hover {
+            border-color: var(--red);
+            color: var(--red);
+            background: #ff6b6b0a;
         }
         .brand-tag {
             display: inline-flex;
@@ -268,6 +289,7 @@
             align-items: center;
             gap: 4px;
             margin-top: 14px;
+            margin-bottom: 10px;
         }
         .checkbox-group .model-select {
             margin-left: auto;
@@ -295,6 +317,60 @@
         .cb-pill.active-download {
             border-color: var(--blue-dim);
             background: #5eadff0a;
+        }
+        /* ─── Toggle Switch ─── */
+        .toggle-wrap {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            cursor: pointer;
+            user-select: none;
+            margin-left: 4px;
+        }
+        .toggle-track {
+            position: relative;
+            width: 32px;
+            height: 18px;
+            border-radius: 100px;
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+        .toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--text-faint);
+            transition: all 0.2s;
+        }
+        .toggle-input {
+            display: none;
+        }
+        .toggle-input:checked + .toggle-track {
+            background: #ffbe4430;
+            border-color: #ffbe4450;
+        }
+        .toggle-input:checked + .toggle-track::after {
+            left: 16px;
+            background: var(--amber);
+        }
+        .toggle-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-faint);
+            transition: color 0.15s;
+            letter-spacing: 0.2px;
+        }
+        .toggle-input:checked ~ .toggle-label {
+            color: var(--amber);
+        }
+        .toggle-wrap:hover .toggle-label {
+            color: var(--text-mid);
         }
         .cb-pill input[type="checkbox"] {
             appearance: none;
@@ -873,6 +949,7 @@
                 <div class="brand-dot"></div>
                 <div class="brand-name">Video Masa</div>
             </div>
+            <button class="quit-btn" onclick="quitApp()">Quit</button>
         </div>
 
         <!-- Main Input Card -->
@@ -896,6 +973,11 @@
                 <label class="cb-pill" id="pillDownload">
                     <input type="checkbox" id="cbDownload">
                     <span class="cb-text">Download</span>
+                </label>
+                <label class="toggle-wrap" id="toggleAutoPaste" title="Toggle auto-send on paste">
+                    <input type="checkbox" class="toggle-input" id="cbAutoPaste" checked>
+                    <div class="toggle-track"></div>
+                    <span class="toggle-label" id="autoPasteLabel">Auto</span>
                 </label>
                 <select class="model-select" id="modelSelect">
                     <option value="tiny">⚡ Tiny — fastest</option>
@@ -948,6 +1030,7 @@
                     const p = JSON.parse(s);
                     if (typeof p.transcribe === 'boolean') document.getElementById('cbTranscribe').checked = p.transcribe;
                     if (typeof p.download === 'boolean') document.getElementById('cbDownload').checked = p.download;
+                    if (typeof p.autoPaste === 'boolean') document.getElementById('cbAutoPaste').checked = p.autoPaste;
                     if (p.model) document.getElementById('modelSelect').value = p.model;
                 }
             } catch(e) {}
@@ -958,6 +1041,7 @@
             localStorage.setItem(PREFS_KEY, JSON.stringify({
                 transcribe: document.getElementById('cbTranscribe').checked,
                 download: document.getElementById('cbDownload').checked,
+                autoPaste: document.getElementById('cbAutoPaste').checked,
                 model: document.getElementById('modelSelect').value
             }));
             updatePills();
@@ -966,12 +1050,15 @@
         function updatePills() {
             const t = document.getElementById('cbTranscribe').checked;
             const d = document.getElementById('cbDownload').checked;
+            const ap = document.getElementById('cbAutoPaste').checked;
             document.getElementById('pillTranscribe').classList.toggle('active-transcribe', t);
             document.getElementById('pillDownload').classList.toggle('active-download', d);
+            document.getElementById('autoPasteLabel').textContent = ap ? 'Auto' : 'Manual';
         }
 
         document.getElementById('cbTranscribe').addEventListener('change', savePrefs);
         document.getElementById('cbDownload').addEventListener('change', savePrefs);
+        document.getElementById('cbAutoPaste').addEventListener('change', savePrefs);
         document.getElementById('modelSelect').addEventListener('change', savePrefs);
         loadPrefs();
 
@@ -1001,7 +1088,11 @@
         const urlInput = document.getElementById('urlInput');
         const resolvedName = document.getElementById('resolvedName');
         urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addJob(); });
-        urlInput.addEventListener('paste', () => { setTimeout(() => addJob(), 0); });
+        urlInput.addEventListener('paste', () => {
+            if (document.getElementById('cbAutoPaste').checked) {
+                setTimeout(() => addJob(), 0);
+            }
+        });
         urlInput.addEventListener('focus', () => { urlInput.select(); });
         urlInput.addEventListener('input', () => { if (!urlInput.value.trim()) hideResolvedName(); });
 
@@ -1524,6 +1615,20 @@
                 setTimeout(() => btn.classList.remove('copied'), 1500);
             });
         }
+
+        // ─── Quit app ───
+        function quitApp() {
+            if (!confirm('Stop Video Masa and clean up files?')) return;
+            fetch('/shutdown', { method: 'POST' }).catch(() => {});
+            document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#08080a;color:#606078;font-family:Outfit,sans-serif;font-size:18px;">Video Masa stopped. You can close this tab.</div>';
+        }
+
+        // ─── Heartbeat — tells server the browser tab is still open ───
+        setInterval(() => {
+            fetch('/heartbeat', { method: 'POST' }).catch(() => {});
+        }, 30000);
+        // Send first heartbeat immediately
+        fetch('/heartbeat', { method: 'POST' }).catch(() => {});
 
         // ─── Auto-download (no save-as dialog) ───
         function autoDownload(jobId, filename, format) {
