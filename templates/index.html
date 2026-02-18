@@ -816,6 +816,33 @@
             border-bottom-color: var(--amber);
         }
 
+        /* ─── URL Copy Button ─── */
+        .job-title {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .job-url-text {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
+        }
+        .url-copy-btn {
+            background: none;
+            border: none;
+            color: var(--text-faint);
+            cursor: pointer;
+            padding: 2px;
+            flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            transition: color 0.15s;
+            border-radius: 3px;
+        }
+        .url-copy-btn:hover { color: var(--text-mid); }
+        .url-copy-btn.copied { color: var(--lime); }
+
         /* ─── Responsive ─── */
         @media (max-width: 540px) {
             .app { padding: 36px 16px 80px; }
@@ -1229,11 +1256,15 @@
                 let sections = '';
 
                 if (job.downloadReady) {
+                    const mp3Name = esc(job.filename).replace(/\.[^.]+$/, '.mp3');
                     sections += `
                         <div class="result-block">
                             <div class="result-header">
                                 <span class="result-title">File Ready</span>
-                                <button class="dl-btn" onclick="autoDownload('${job.id}', '${esc(job.filename)}')">&#8595; ${esc(job.filename)}</button>
+                                <div class="action-row">
+                                    <button class="dl-btn" onclick="autoDownload('${job.id}', '${esc(job.filename)}', 'mp4')">&#8595; MP4</button>
+                                    <button class="dl-btn" onclick="autoDownload('${job.id}', '${mp3Name}', 'mp3')">&#8595; MP3</button>
+                                </div>
                             </div>
                         </div>`;
                 }
@@ -1329,7 +1360,7 @@
                                 <div class="job-label" title="${esc(job.url || job.label)}">${esc(job.title || job.label)}</div>
                                 <div class="job-badges">${badges}</div>
                             </div>
-                            ${job.title && job.url ? `<div class="job-title">${esc(job.label)}</div>` : ''}
+                            ${job.title && job.url ? `<div class="job-title"><span class="job-url-text">${esc(job.label)}</span><button class="url-copy-btn" title="Copy link" onclick="copyUrl('${esc(job.url)}', this)"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3a1.5 1.5 0 0 0-1.5-1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h2.5"/></svg></button></div>` : ''}
                             <div class="job-status">
                                 <div class="dot ${dotClass}"></div>
                                 <span class="job-msg">Status: ${esc(job.message)}</span>
@@ -1486,9 +1517,18 @@
             }
         });
 
+        // ─── Copy URL to clipboard ───
+        function copyUrl(url, btn) {
+            navigator.clipboard.writeText(url).then(() => {
+                btn.classList.add('copied');
+                setTimeout(() => btn.classList.remove('copied'), 1500);
+            });
+        }
+
         // ─── Auto-download (no save-as dialog) ───
-        function autoDownload(jobId, filename) {
-            fetch(`/download/${jobId}`)
+        function autoDownload(jobId, filename, format) {
+            const endpoint = format === 'mp3' ? `/download-mp3/${jobId}` : `/download/${jobId}`;
+            fetch(endpoint)
                 .then(resp => {
                     if (!resp.ok) throw new Error('File not available');
                     return resp.blob();
@@ -1502,18 +1542,6 @@
                     a.click();
                     document.body.removeChild(a);
                     URL.revokeObjectURL(url);
-
-                    // Server file is fully in browser memory — delete server copy
-                    fetch(`/cleanup/${jobId}`, { method: 'POST' })
-                        .then(() => {
-                            const job = jobQueue.find(j => j.id === jobId);
-                            if (job) {
-                                job.downloadReady = false;
-                                job.fileStatus = 'cleaned';
-                                renderQueue();
-                            }
-                        })
-                        .catch(() => {}); // Cleanup failure is non-critical
                 })
                 .catch(err => alert('Download failed: ' + err.message));
         }

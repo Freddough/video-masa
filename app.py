@@ -601,6 +601,29 @@ def download_file(job_id):
     return send_file(filepath, as_attachment=True, download_name=filename)
 
 
+@app.route("/download-mp3/<job_id>")
+def download_mp3(job_id):
+    job = jobs.get(job_id)
+    if not job or not job.get("download_ready"):
+        return jsonify({"error": "File not available"}), 404
+
+    filepath = Path(job["download_path"])
+    if not filepath.exists():
+        return jsonify({"error": "File no longer exists"}), 404
+
+    mp3_path = filepath.with_suffix(".mp3")
+    if not mp3_path.exists():
+        result = subprocess.run(
+            ["ffmpeg", "-i", str(filepath), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
+            capture_output=True, timeout=120
+        )
+        if result.returncode != 0:
+            return jsonify({"error": "MP3 conversion failed"}), 500
+
+    mp3_filename = Path(job["filename"]).with_suffix(".mp3").name
+    return send_file(str(mp3_path), as_attachment=True, download_name=mp3_filename)
+
+
 @app.route("/cleanup/<job_id>", methods=["POST"])
 def cleanup_file(job_id):
     """Delete the server-side video file for a completed job."""
@@ -613,6 +636,10 @@ def cleanup_file(job_id):
         p = Path(file_path)
         if p.exists():
             p.unlink(missing_ok=True)
+        # Clean up converted MP3 too
+        mp3_p = p.with_suffix(".mp3")
+        if mp3_p.exists():
+            mp3_p.unlink(missing_ok=True)
 
     # Clean up thumbnail too
     thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
