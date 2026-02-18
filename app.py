@@ -5,6 +5,7 @@ localhost:5000 — paste any video link, transcribe it, download it, or both.
 
 import os
 import re
+import sys
 import uuid
 import json
 import atexit
@@ -12,13 +13,27 @@ import signal
 import subprocess
 import threading
 import mimetypes
+import webbrowser
 from pathlib import Path
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file
 
 app = Flask(__name__)
 
-WORK_DIR = Path(__file__).parent / "downloads"
+
+def _find_ffmpeg():
+    """Find ffmpeg: bundled in .app Resources, or system PATH."""
+    # Check relative to this script (for .app bundle: ../Resources/ffmpeg)
+    candidate = Path(__file__).resolve().parent.parent / "Resources" / "ffmpeg"
+    if candidate.exists():
+        return str(candidate)
+    # Fall back to system PATH
+    return "ffmpeg"
+
+
+FFMPEG_BIN = _find_ffmpeg()
+
+WORK_DIR = Path(os.environ.get("VIDEOMASA_WORK_DIR", Path(__file__).parent / "downloads"))
 WORK_DIR.mkdir(exist_ok=True)
 
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
@@ -189,7 +204,7 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
             mime = mimetypes.guess_type(str(file_path))[0] or ""
             if mime.startswith("video/"):
                 subprocess.run(
-                    ["ffmpeg", "-i", str(file_path), "-ss", "1", "-frames:v", "1",
+                    [FFMPEG_BIN, "-i", str(file_path), "-ss", "1", "-frames:v", "1",
                      "-vf", "scale=320:-1", "-q:v", "5", str(thumb_path)],
                     capture_output=True, timeout=15
                 )
@@ -614,7 +629,7 @@ def download_mp3(job_id):
     mp3_path = filepath.with_suffix(".mp3")
     if not mp3_path.exists():
         result = subprocess.run(
-            ["ffmpeg", "-i", str(filepath), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
+            [FFMPEG_BIN, "-i", str(filepath), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
             capture_output=True, timeout=120
         )
         if result.returncode != 0:
@@ -696,8 +711,19 @@ signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
 
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    """Graceful shutdown endpoint for the launcher/menu bar to stop the server."""
+    cleanup_downloads_dir()
+    os.kill(os.getpid(), signal.SIGTERM)
+    return jsonify({"ok": True})
+
+
 if __name__ == "__main__":
+    port = int(os.environ.get("VIDEOMASA_PORT", 8080))
+    if os.environ.get("VIDEOMASA_OPEN_BROWSER", "").lower() in ("1", "true", "yes"):
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()
     print("\n" + "=" * 52)
-    print("  VIDEO TOOL running at http://localhost:8080")
+    print(f"  VIDEO TOOL running at http://localhost:{port}")
     print("=" * 52 + "\n")
-    app.run(debug=False, port=8080)
+    app.run(debug=False, port=port)
