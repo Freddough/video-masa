@@ -74,8 +74,29 @@
 
         /* ─── Header ─── */
         .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
             margin-bottom: 28px;
             animation: fadeUp 0.6s ease both;
+        }
+        .quit-btn {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 100px;
+            padding: 7px 16px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-faint);
+            cursor: pointer;
+            transition: all 0.15s;
+            margin-top: 6px;
+        }
+        .quit-btn:hover {
+            border-color: var(--red);
+            color: var(--red);
+            background: #ff6b6b0a;
         }
         .brand-tag {
             display: inline-flex;
@@ -211,6 +232,7 @@
             display: flex;
             align-items: center;
             gap: 16px;
+            margin-top: 24px;
             margin-bottom: 20px;
         }
         .or-line {
@@ -263,13 +285,19 @@
             display: none;
         }
 
-        .checkbox-group {
+        /* ─── Controls area ─── */
+        .controls-area {
+            margin-top: 16px;
+        }
+        .controls-row {
             display: flex;
             align-items: center;
-            gap: 4px;
-            margin-top: 14px;
+            gap: 6px;
         }
-        .checkbox-group .model-select {
+        .controls-row + .controls-row {
+            margin-top: 10px;
+        }
+        .controls-push {
             margin-left: auto;
         }
         .cb-pill {
@@ -295,6 +323,62 @@
         .cb-pill.active-download {
             border-color: var(--blue-dim);
             background: #5eadff0a;
+        }
+        /* ─── Toggle Switch ─── */
+        .toggle-wrap {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .toggle-wrap.controls-push {
+            margin-left: auto;
+        }
+        .toggle-track {
+            position: relative;
+            width: 32px;
+            height: 18px;
+            border-radius: 100px;
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+        .toggle-track::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--text-faint);
+            transition: all 0.2s;
+        }
+        .toggle-input {
+            display: none;
+        }
+        .toggle-input:checked + .toggle-track {
+            background: #ffbe4430;
+            border-color: #ffbe4450;
+        }
+        .toggle-input:checked + .toggle-track::after {
+            left: 16px;
+            background: var(--amber);
+        }
+        .toggle-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-faint);
+            transition: color 0.15s;
+            letter-spacing: 0.2px;
+        }
+        .toggle-input:checked ~ .toggle-label {
+            color: var(--amber);
+        }
+        .toggle-wrap:hover .toggle-label {
+            color: var(--text-mid);
         }
         .cb-pill input[type="checkbox"] {
             appearance: none;
@@ -339,20 +423,82 @@
         .cb-pill.active-transcribe .cb-text { color: var(--lime); }
         .cb-pill.active-download .cb-text { color: var(--blue); }
 
-        .model-select {
-            background: var(--surface);
+        .config-select {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 7px 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 500;
+            color: var(--text-dim);
+            outline: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            flex: 1;
+            min-width: 0;
+        }
+        .config-select:hover { border-color: var(--border-hover); color: var(--text-mid); }
+        .config-select:focus { border-color: var(--lime); }
+        .config-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-faint);
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .config-pair {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex: 1;
+            min-width: 0;
+        }
+        .config-divider {
+            width: 1px;
+            height: 20px;
+            background: var(--border);
+            flex-shrink: 0;
+        }
+
+        /* ─── Per-job quality select ─── */
+        .quality-job-select {
+            background: var(--surface-3);
             border: 1px solid var(--border);
             border-radius: 100px;
-            padding: 8px 14px;
+            padding: 4px 10px;
             font-family: 'Outfit', sans-serif;
-            font-size: 13px;
+            font-size: 11px;
+            font-weight: 500;
             color: var(--text-dim);
             outline: none;
             cursor: pointer;
             transition: border-color 0.2s;
         }
-        .model-select:hover { border-color: var(--border-hover); }
-        .model-select:focus { border-color: var(--lime); }
+        .quality-job-select:hover { border-color: var(--border-hover); }
+        .quality-job-select:focus { border-color: var(--blue); }
+
+        /* ─── File ready split layout ─── */
+        .file-ready-row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .file-ready-pair {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        /* ─── Quality badge ─── */
+        .badge-q {
+            background: #5eadff12;
+            color: var(--blue);
+            border: 1px solid var(--blue-dim);
+        }
 
         /* ─── Divider ─── */
         .section-divider {
@@ -847,8 +993,8 @@
         @media (max-width: 540px) {
             .app { padding: 36px 16px 80px; }
             .main-card { padding: 20px; }
-            .checkbox-group { flex-wrap: wrap; }
-            .checkbox-group .model-select { margin-left: 0; width: 100%; margin-top: 4px; }
+            .controls-row { flex-wrap: wrap; }
+            .controls-push { margin-left: 0; }
             .input-row { flex-direction: column; }
             .add-btn { padding: 14px; border-radius: var(--radius); }
         }
@@ -873,6 +1019,7 @@
                 <div class="brand-dot"></div>
                 <div class="brand-name">Video Masa</div>
             </div>
+            <button class="quit-btn" onclick="quitApp()">Quit</button>
         </div>
 
         <!-- Main Input Card -->
@@ -888,21 +1035,46 @@
                 <button class="add-btn" id="addBtn" onclick="addJob()">+ Add</button>
             </div>
 
-            <div class="checkbox-group">
-                <label class="cb-pill" id="pillTranscribe">
-                    <input type="checkbox" id="cbTranscribe" checked>
-                    <span class="cb-text">Transcribe</span>
-                </label>
-                <label class="cb-pill" id="pillDownload">
-                    <input type="checkbox" id="cbDownload">
-                    <span class="cb-text">Download</span>
-                </label>
-                <select class="model-select" id="modelSelect">
-                    <option value="tiny">⚡ Tiny — fastest</option>
-                    <option value="base" selected>⚖️ Base — recommended</option>
-                    <option value="small">🎯 Small — more accurate</option>
-                    <option value="medium">🔬 Medium — best accuracy</option>
-                </select>
+            <div class="controls-area">
+                <div class="controls-row">
+                    <label class="cb-pill" id="pillTranscribe">
+                        <input type="checkbox" id="cbTranscribe" checked>
+                        <span class="cb-text">Transcribe</span>
+                    </label>
+                    <label class="cb-pill" id="pillDownload">
+                        <input type="checkbox" id="cbDownload">
+                        <span class="cb-text">Download</span>
+                    </label>
+                    <label class="toggle-wrap controls-push" id="toggleAutoPaste" title="Toggle auto-send on paste">
+                        <input type="checkbox" class="toggle-input" id="cbAutoPaste" checked>
+                        <div class="toggle-track"></div>
+                        <span class="toggle-label" id="autoPasteLabel">Auto</span>
+                    </label>
+                </div>
+                <div class="controls-row">
+                    <div class="config-pair">
+                        <span class="config-label">Cookies</span>
+                        <select class="config-select" id="cookiesSelect"
+                            title="Pass your browser's cookies to yt-dlp for sites that require login (like Twitter/X). Select the browser you're logged into to download protected content.">
+                            <option value="none" selected>None</option>
+                            <option value="chrome">Chrome</option>
+                            <option value="firefox">Firefox</option>
+                            <option value="safari">Safari</option>
+                            <option value="edge">Edge</option>
+                            <option value="brave">Brave</option>
+                        </select>
+                    </div>
+                    <div class="config-divider"></div>
+                    <div class="config-pair">
+                        <span class="config-label">Model</span>
+                        <select class="config-select" id="modelSelect">
+                            <option value="tiny">Tiny — fastest</option>
+                            <option value="base" selected>Base — balanced</option>
+                            <option value="small">Small — accurate</option>
+                            <option value="medium">Medium — best</option>
+                        </select>
+                    </div>
+                </div>
             </div>
 
             <div class="or-divider">
@@ -948,7 +1120,9 @@
                     const p = JSON.parse(s);
                     if (typeof p.transcribe === 'boolean') document.getElementById('cbTranscribe').checked = p.transcribe;
                     if (typeof p.download === 'boolean') document.getElementById('cbDownload').checked = p.download;
+                    if (typeof p.autoPaste === 'boolean') document.getElementById('cbAutoPaste').checked = p.autoPaste;
                     if (p.model) document.getElementById('modelSelect').value = p.model;
+                    if (p.cookies_browser) document.getElementById('cookiesSelect').value = p.cookies_browser;
                 }
             } catch(e) {}
             updatePills();
@@ -958,7 +1132,9 @@
             localStorage.setItem(PREFS_KEY, JSON.stringify({
                 transcribe: document.getElementById('cbTranscribe').checked,
                 download: document.getElementById('cbDownload').checked,
-                model: document.getElementById('modelSelect').value
+                autoPaste: document.getElementById('cbAutoPaste').checked,
+                model: document.getElementById('modelSelect').value,
+                cookies_browser: document.getElementById('cookiesSelect').value
             }));
             updatePills();
         }
@@ -966,13 +1142,17 @@
         function updatePills() {
             const t = document.getElementById('cbTranscribe').checked;
             const d = document.getElementById('cbDownload').checked;
+            const ap = document.getElementById('cbAutoPaste').checked;
             document.getElementById('pillTranscribe').classList.toggle('active-transcribe', t);
             document.getElementById('pillDownload').classList.toggle('active-download', d);
+            document.getElementById('autoPasteLabel').textContent = ap ? 'Auto' : 'Manual';
         }
 
         document.getElementById('cbTranscribe').addEventListener('change', savePrefs);
         document.getElementById('cbDownload').addEventListener('change', savePrefs);
+        document.getElementById('cbAutoPaste').addEventListener('change', savePrefs);
         document.getElementById('modelSelect').addEventListener('change', savePrefs);
+        document.getElementById('cookiesSelect').addEventListener('change', savePrefs);
         loadPrefs();
 
         // ─── Drop zone ───
@@ -1001,7 +1181,11 @@
         const urlInput = document.getElementById('urlInput');
         const resolvedName = document.getElementById('resolvedName');
         urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addJob(); });
-        urlInput.addEventListener('paste', () => { setTimeout(() => addJob(), 0); });
+        urlInput.addEventListener('paste', () => {
+            if (document.getElementById('cbAutoPaste').checked) {
+                setTimeout(() => addJob(), 0);
+            }
+        });
         urlInput.addEventListener('focus', () => { urlInput.select(); });
         urlInput.addEventListener('input', () => { if (!urlInput.value.trim()) hideResolvedName(); });
 
@@ -1028,6 +1212,7 @@
             const doT = document.getElementById('cbTranscribe').checked;
             const doD = document.getElementById('cbDownload').checked;
             const model = document.getElementById('modelSelect').value;
+            const cookies_browser = document.getElementById('cookiesSelect').value;
 
             if (!doT && !doD) {
                 document.getElementById('pillTranscribe').style.animation = 'shake 0.4s ease';
@@ -1080,7 +1265,7 @@
                 const resp = await fetch('/process', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, model, transcribe: doT, download: doD })
+                    body: JSON.stringify({ url, model, cookies_browser, transcribe: doT, download: doD })
                 });
                 const data = await resp.json();
                 if (data.error) { alert(data.error); return; }
@@ -1093,7 +1278,8 @@
                     downloadReady: false, filename: '',
                     title: '', thumbnail: '', merged: false,
                     showTimestamped: {},
-                    model: model, transcripts: {}, activeTab: model
+                    model: model, availableFormats: {video: [], audio: []}, downloadedQuality: '',
+                    transcripts: {}, activeTab: model
                 };
                 jobQueue.unshift(job);
                 currentInputJobId = job.id;
@@ -1159,6 +1345,11 @@
                     job.title = data.title || job.title;
                     job.thumbnail = data.thumbnail || job.thumbnail;
                     job.fileStatus = data.file_status || job.fileStatus;
+                    if (data.available_formats) {
+                        const af = data.available_formats;
+                        if (af.video && af.video.length || af.audio && af.audio.length) job.availableFormats = af;
+                    }
+                    if (data.downloaded_quality) job.downloadedQuality = data.downloaded_quality;
                     if (data.transcripts) job.transcripts = data.transcripts;
 
                     // Show resolved title near input if this is the current input job
@@ -1251,19 +1442,48 @@
                 if (job.doTranscribe) badges += '<span class="badge badge-t">Transcribe</span>';
                 if (job.doDownload) badges += '<span class="badge badge-d">Download</span>';
                 if (job.merged) badges += '<span class="badge badge-merged">Merged</span>';
+                if (job.downloadedQuality) badges += `<span class="badge badge-q">${esc(job.downloadedQuality)}</span>`;
 
                 // ── Build sections ──
                 let sections = '';
 
                 if (job.downloadReady) {
                     const mp3Name = esc(job.filename).replace(/\.[^.]+$/, '.mp3');
+                    const fmts = job.availableFormats || {video: [], audio: []};
+                    const videoFmts = fmts.video || [];
+                    const audioFmts = fmts.audio || [];
+
+                    let videoDropdown = '';
+                    if (videoFmts.length > 0) {
+                        const opts = videoFmts.map(h => `<option value="${h}">${h}p</option>`).join('');
+                        videoDropdown = `<select class="quality-job-select" id="vq-${job.id}">
+                            <option value="best" selected>Best</option>
+                            ${opts}
+                        </select>`;
+                    }
+
+                    let audioDropdown = '';
+                    if (audioFmts.length > 0) {
+                        const opts = audioFmts.map(b => `<option value="${b}">${b}kbps</option>`).join('');
+                        audioDropdown = `<select class="quality-job-select" id="aq-${job.id}">
+                            <option value="best" selected>Best</option>
+                            ${opts}
+                        </select>`;
+                    }
+
                     sections += `
                         <div class="result-block">
                             <div class="result-header">
                                 <span class="result-title">File Ready</span>
-                                <div class="action-row">
-                                    <button class="dl-btn" onclick="autoDownload('${job.id}', '${esc(job.filename)}', 'mp4')">&#8595; MP4</button>
-                                    <button class="dl-btn" onclick="autoDownload('${job.id}', '${mp3Name}', 'mp3')">&#8595; MP3</button>
+                            </div>
+                            <div class="file-ready-row">
+                                <div class="file-ready-pair">
+                                    ${videoDropdown}
+                                    <button class="dl-btn" onclick="downloadWithQuality('${job.id}', 'video')">&#8595; MP4</button>
+                                </div>
+                                <div class="file-ready-pair">
+                                    ${audioDropdown}
+                                    <button class="dl-btn" onclick="downloadWithQuality('${job.id}', 'audio')">&#8595; MP3</button>
                                 </div>
                             </div>
                         </div>`;
@@ -1523,6 +1743,101 @@
                 btn.classList.add('copied');
                 setTimeout(() => btn.classList.remove('copied'), 1500);
             });
+        }
+
+        // ─── Quit app ───
+        function quitApp() {
+            if (!confirm('Stop Video Masa and clean up files?')) return;
+            fetch('/shutdown', { method: 'POST' }).catch(() => {});
+            document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#08080a;color:#606078;font-family:Outfit,sans-serif;font-size:18px;">Video Masa stopped. You can close this tab.</div>';
+        }
+
+        // ─── Heartbeat — tells server the browser tab is still open ───
+        setInterval(() => {
+            fetch('/heartbeat', { method: 'POST' }).catch(() => {});
+        }, 30000);
+        // Send first heartbeat immediately
+        fetch('/heartbeat', { method: 'POST' }).catch(() => {});
+
+        // ─── Download with quality — spawns new job if quality differs from current ───
+        async function downloadWithQuality(jobId, type) {
+            const sourceJob = jobQueue.find(j => j.id === jobId);
+            if (!sourceJob) return;
+
+            if (type === 'video') {
+                const select = document.getElementById(`vq-${jobId}`);
+                const value = select ? select.value : 'best';
+                if (value === 'best') {
+                    // Direct download of existing file
+                    autoDownload(jobId, sourceJob.filename, 'mp4');
+                    return;
+                }
+                // Spawn new job at specific video quality
+                await spawnRedownload(jobId, { height: parseInt(value) });
+                if (select) select.value = 'best';
+            } else {
+                const select = document.getElementById(`aq-${jobId}`);
+                const value = select ? select.value : 'best';
+                if (value === 'best') {
+                    // Convert existing file to MP3
+                    const mp3Name = sourceJob.filename.replace(/\.[^.]+$/, '.mp3');
+                    autoDownload(jobId, mp3Name, 'mp3');
+                    return;
+                }
+                // Spawn new job at specific audio bitrate
+                await spawnRedownload(jobId, { audio_bitrate: parseInt(value) });
+                if (select) select.value = 'best';
+            }
+        }
+
+        async function spawnRedownload(sourceJobId, opts) {
+            const sourceJob = jobQueue.find(j => j.id === sourceJobId);
+            if (!sourceJob) return;
+
+            const cookies_browser = document.getElementById('cookiesSelect').value;
+            const body = { ...opts, cookies_browser };
+
+            try {
+                const resp = await fetch(`/redownload/${sourceJobId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await resp.json();
+                if (data.error) { alert(data.error); return; }
+
+                const qualityLabel = opts.audio_bitrate ? opts.audio_bitrate + 'kbps'
+                    : opts.audio_only ? 'Audio'
+                    : opts.height + 'p';
+
+                const newJob = {
+                    id: data.new_job_id,
+                    label: sourceJob.label,
+                    url: sourceJob.url,
+                    doTranscribe: false,
+                    doDownload: true,
+                    status: 'queued',
+                    message: `Downloading at ${qualityLabel}...`,
+                    transcript: '', timestamped: '',
+                    downloadReady: false, filename: '',
+                    title: sourceJob.title,
+                    thumbnail: sourceJob.thumbnail,
+                    merged: false,
+                    showTimestamped: {},
+                    model: '',
+                    availableFormats: sourceJob.availableFormats,
+                    transcripts: {},
+                    activeTab: '',
+                    downloadedQuality: qualityLabel
+                };
+
+                // Insert right after the source job
+                const sourceIdx = jobQueue.indexOf(sourceJob);
+                jobQueue.splice(sourceIdx + 1, 0, newJob);
+
+                renderQueue();
+                pollJob(newJob);
+            } catch(e) { alert('Re-download failed: ' + e.message); }
         }
 
         // ─── Auto-download (no save-as dialog) ───

@@ -36,30 +36,85 @@ FFMPEG_BIN = _find_ffmpeg()
 WORK_DIR = Path(os.environ.get("VIDEOMASA_WORK_DIR", Path(__file__).parent / "downloads"))
 WORK_DIR.mkdir(exist_ok=True)
 
+ALLOWED_COOKIES_BROWSERS = ("none", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi", "chromium")
+
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
 jobs = {}
 
+# Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 90s
+import time
+_last_heartbeat = time.time()
+_HEARTBEAT_TIMEOUT = 90  # seconds
 
-def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_download: bool):
+
+def _is_twitter_url(url):
+    """Check if a URL is from Twitter/X."""
+    return bool(re.match(r'https?://(www\.)?(twitter\.com|x\.com)/', url))
+
+
+def _probe_formats(url, cookies_browser="none"):
+    """Probe available formats for a URL using yt-dlp -j.
+    Returns dict: {"video": [2160, 1080, ...], "audio": [130, 49, ...]}"""
+    try:
+        cmd = ["yt-dlp", "-j", "--no-playlist", url]
+        if cookies_browser != "none":
+            cmd[1:1] = ["--cookies-from-browser", cookies_browser]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return {"video": [], "audio": []}
+        info = json.loads(result.stdout)
+        formats = info.get("formats", [])
+        heights = set()
+        bitrates = set()
+        for fmt in formats:
+            h = fmt.get("height")
+            if h and isinstance(h, int) and h > 0:
+                heights.add(h)
+            # Audio-only formats: vcodec is "none" and has acodec
+            vcodec = fmt.get("vcodec", "")
+            acodec = fmt.get("acodec", "")
+            abr = fmt.get("abr")
+            if vcodec == "none" and acodec and acodec != "none" and abr:
+                bitrates.add(round(abr))
+        return {
+            "video": sorted(heights, reverse=True),
+            "audio": sorted(bitrates, reverse=True),
+        }
+    except Exception:
+        return {"video": [], "audio": []}
+
+
+def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_download: bool,
+            cookies_browser: str = "none"):
     """Background worker: download video, optionally transcribe, optionally keep file for download."""
     job = jobs[job_id]
 
     try:
-        # Grab thumbnail URL (quick metadata-only call, no file saved)
+        # Download thumbnail locally (remote CDN URLs expire/get blocked)
         try:
-            thumb_result = subprocess.run(
-                ["yt-dlp", "--get-thumbnail", "--no-playlist", url],
-                capture_output=True, text=True, timeout=15
-            )
-            if thumb_result.returncode == 0 and thumb_result.stdout.strip():
-                job["thumbnail"] = thumb_result.stdout.strip()
+            thumb_cmd = ["yt-dlp", "--no-playlist", "--write-thumbnail",
+                         "--skip-download", "--convert-thumbnails", "jpg",
+                         "-o", str(WORK_DIR / f"{job_id}_thumb"), url]
+            if cookies_browser != "none":
+                thumb_cmd[1:1] = ["--cookies-from-browser", cookies_browser]
+            thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
+            subprocess.run(thumb_cmd, capture_output=True, text=True, timeout=15)
+            if thumb_path.exists():
+                job["thumbnail"] = f"/thumb/{job_id}"
         except Exception:
             pass  # thumbnail is optional, don't block the job
+
+        # Probe available formats in background thread
+        probe_result = [None]
+        def do_probe():
+            probe_result[0] = _probe_formats(url, cookies_browser)
+        probe_thread = threading.Thread(target=do_probe, daemon=True)
+        probe_thread.start()
 
         job["status"] = "downloading"
         job["message"] = "Downloading video..."
 
-        # Download with yt-dlp
+        # Download with yt-dlp — always best quality
         out_template = str(WORK_DIR / f"{job_id}_%(title)s.%(ext)s")
         cmd = [
             "yt-dlp",
@@ -67,13 +122,38 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             "-o", out_template,
             "-S", "vcodec:h264,acodec:aac",
             "--merge-output-format", "mp4",
-            url
         ]
+
+        if cookies_browser != "none":
+            cmd.extend(["--cookies-from-browser", cookies_browser])
+
+        if _is_twitter_url(url):
+            cmd.extend(["--extractor-retries", "5"])
+
+        cmd.append(url)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+        # Collect probe results (wait up to 5s if still running)
+        probe_thread.join(timeout=5)
+        if probe_result[0]:
+            job["available_formats"] = probe_result[0]
+            # Best quality = highest probed video height
+            video_heights = probe_result[0].get("video", [])
+            if video_heights:
+                job["downloaded_quality"] = f"{video_heights[0]}p"
 
         if result.returncode != 0:
             job["status"] = "error"
-            job["message"] = f"Download failed: {result.stderr[:200]}"
+            stderr = result.stderr
+            if _is_twitter_url(url):
+                if "No video could be found" in stderr or "Requested format is not available" in stderr:
+                    job["message"] = "Twitter: Video requires login. Set 'Browser cookies' to your browser and retry."
+                elif "Failed to parse JSON" in stderr or "guest token" in stderr.lower():
+                    job["message"] = "Twitter: API error. Try setting browser cookies, or update yt-dlp."
+                else:
+                    job["message"] = f"Twitter download failed: {stderr[:200]}"
+            else:
+                job["message"] = f"Download failed: {stderr[:200]}"
             return
 
         # Find the downloaded file
@@ -306,9 +386,12 @@ def process():
     model_size = data.get("model", "base")
     do_transcribe = data.get("transcribe", True)
     do_download = data.get("download", False)
+    cookies_browser = data.get("cookies_browser", "none")
 
     if model_size not in ("tiny", "base", "small", "medium"):
         model_size = "base"
+    if cookies_browser not in ALLOWED_COOKIES_BROWSERS:
+        cookies_browser = "none"
 
     if not url:
         return jsonify({"error": "No URL provided"}), 400
@@ -332,10 +415,12 @@ def process():
         "do_download": do_download,
         "transcripts": {},
         "model": model_size,
+        "available_formats": {"video": [], "audio": []},
+        "downloaded_quality": "Best",
         "file_status": "absent",
     }
 
-    thread = threading.Thread(target=run_job, args=(job_id, url, model_size, do_transcribe, do_download))
+    thread = threading.Thread(target=run_job, args=(job_id, url, model_size, do_transcribe, do_download, cookies_browser))
     thread.daemon = True
     thread.start()
 
@@ -639,6 +724,141 @@ def download_mp3(job_id):
     return send_file(str(mp3_path), as_attachment=True, download_name=mp3_filename)
 
 
+@app.route("/redownload/<job_id>", methods=["POST"])
+def redownload(job_id):
+    """Re-download at a specific quality, creating a NEW job in the queue."""
+    import shutil
+
+    source_job = jobs.get(job_id)
+    if not source_job:
+        return jsonify({"error": "Job not found"}), 404
+
+    url = source_job.get("url", "")
+    if not url:
+        return jsonify({"error": "No URL — file uploads cannot be re-downloaded"}), 400
+
+    data = request.json
+    height = data.get("height")          # int like 720, or None
+    audio_only = data.get("audio_only", False)
+    audio_bitrate = data.get("audio_bitrate")  # int like 130, or None
+
+    if not height and not audio_only and not audio_bitrate:
+        return jsonify({"error": "Specify height, audio_bitrate, or audio_only"}), 400
+
+    cookies_browser = data.get("cookies_browser", "none")
+    if cookies_browser not in ALLOWED_COOKIES_BROWSERS:
+        cookies_browser = "none"
+
+    # Determine quality label
+    if audio_only or audio_bitrate:
+        quality_label = f"{audio_bitrate}kbps" if audio_bitrate else "Audio"
+    else:
+        quality_label = f"{height}p"
+
+    # Create new job
+    new_job_id = uuid.uuid4().hex[:12]
+
+    # Copy thumbnail so it persists independently
+    source_thumb = WORK_DIR / f"{job_id}_thumb.jpg"
+    new_thumb = WORK_DIR / f"{new_job_id}_thumb.jpg"
+    thumb_url = ""
+    if source_thumb.exists():
+        shutil.copy2(str(source_thumb), str(new_thumb))
+        thumb_url = f"/thumb/{new_job_id}"
+
+    jobs[new_job_id] = {
+        "status": "queued",
+        "message": f"Downloading at {quality_label}...",
+        "transcript": "",
+        "timestamped": "",
+        "download_ready": False,
+        "download_path": "",
+        "filename": "",
+        "title": source_job.get("title", ""),
+        "thumbnail": thumb_url,
+        "url": url,
+        "do_transcribe": False,
+        "do_download": True,
+        "transcripts": {},
+        "model": "",
+        "available_formats": source_job.get("available_formats", {"video": [], "audio": []}),
+        "downloaded_quality": quality_label,
+        "file_status": "absent",
+    }
+
+    new_job = jobs[new_job_id]
+
+    def do_redownload():
+        try:
+            new_job["status"] = "downloading"
+            new_job["message"] = f"Downloading at {quality_label}..."
+
+            out_template = str(WORK_DIR / f"{new_job_id}_%(title)s.%(ext)s")
+            cmd = ["yt-dlp", "--no-playlist", "-o", out_template]
+
+            if audio_only or audio_bitrate:
+                if audio_bitrate:
+                    cmd.extend(["-S", f"abr:{audio_bitrate},acodec:aac", "-x", "--audio-format", "m4a"])
+                else:
+                    cmd.extend(["-S", "acodec:aac", "-x", "--audio-format", "m4a"])
+            else:
+                cmd.extend(["-S", f"res:{height},vcodec:h264,acodec:aac", "--merge-output-format", "mp4"])
+
+            if cookies_browser != "none":
+                cmd.extend(["--cookies-from-browser", cookies_browser])
+            if _is_twitter_url(url):
+                cmd.extend(["--extractor-retries", "5"])
+
+            cmd.append(url)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+            if result.returncode != 0:
+                new_job["status"] = "error"
+                new_job["message"] = f"Download failed: {result.stderr[:200]}"
+                check_queue_and_cleanup()
+                return
+
+            # Find downloaded file
+            downloaded = None
+            for f in WORK_DIR.iterdir():
+                if f.name.startswith(new_job_id) and not f.name.endswith("_thumb.jpg") and f.suffix in ('.mp4', '.mkv', '.webm', '.mov', '.m4a', '.mp3', '.wav'):
+                    downloaded = f
+                    break
+
+            if not downloaded:
+                new_job["status"] = "error"
+                new_job["message"] = "Download completed but file not found."
+                check_queue_and_cleanup()
+                return
+
+            new_job["_file_path"] = str(downloaded)
+            new_job["file_status"] = "present"
+            prefix = f"{new_job_id}_"
+            display_name = downloaded.name
+            if display_name.startswith(prefix):
+                display_name = display_name[len(prefix):]
+            new_job["filename"] = display_name
+            new_job["download_ready"] = True
+            new_job["download_path"] = str(downloaded)
+            new_job["status"] = "done"
+            new_job["message"] = "Complete"
+            check_queue_and_cleanup()
+
+        except subprocess.TimeoutExpired:
+            new_job["status"] = "error"
+            new_job["message"] = "Download timed out."
+            check_queue_and_cleanup()
+        except Exception as e:
+            new_job["status"] = "error"
+            new_job["message"] = f"Error: {str(e)}"
+            check_queue_and_cleanup()
+
+    t = threading.Thread(target=do_redownload, daemon=True)
+    t.start()
+
+    return jsonify({"ok": True, "new_job_id": new_job_id})
+
+
 @app.route("/cleanup/<job_id>", methods=["POST"])
 def cleanup_file(job_id):
     """Delete the server-side video file for a completed job."""
@@ -719,10 +939,34 @@ def shutdown():
     return jsonify({"ok": True})
 
 
+@app.route("/heartbeat", methods=["POST"])
+def heartbeat():
+    """Browser pings this every 30s. If no ping for 90s, server auto-shuts down."""
+    global _last_heartbeat
+    _last_heartbeat = time.time()
+    return jsonify({"ok": True})
+
+
+def _heartbeat_watchdog():
+    """Background thread: check heartbeat, shut down if browser tab is gone."""
+    while True:
+        time.sleep(30)
+        if time.time() - _last_heartbeat > _HEARTBEAT_TIMEOUT:
+            print("\nNo browser heartbeat for 90s — shutting down.")
+            cleanup_downloads_dir()
+            os.kill(os.getpid(), signal.SIGTERM)
+            break
+
+
 if __name__ == "__main__":
+    # Clean up any leftover files from a previous un-clean shutdown
+    cleanup_downloads_dir()
     port = int(os.environ.get("VIDEOMASA_PORT", 8080))
     if os.environ.get("VIDEOMASA_OPEN_BROWSER", "").lower() in ("1", "true", "yes"):
         threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+    # Start heartbeat watchdog — auto-shuts down if browser tab is closed
+    watchdog = threading.Thread(target=_heartbeat_watchdog, daemon=True)
+    watchdog.start()
     print("\n" + "=" * 52)
     print(f"  VIDEO TOOL running at http://localhost:{port}")
     print("=" * 52 + "\n")
