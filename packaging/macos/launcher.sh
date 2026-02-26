@@ -8,6 +8,7 @@ APP_DIR="$RESOURCES_DIR/app"
 VM_HOME="$HOME/.videomasa"
 VENV_DIR="$VM_HOME/venv"
 WORK_DIR="$VM_HOME/downloads"
+COOKIES_DIR="$VM_HOME/cookies"
 PID_FILE="$VM_HOME/server.pid"
 LOG_FILE="$VM_HOME/server.log"
 PORT=8080
@@ -24,7 +25,7 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
-mkdir -p "$VM_HOME" "$WORK_DIR"
+mkdir -p "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR"
 
 # ─── First-run: no venv yet → open Terminal with setup script ───
 if [ ! -d "$VENV_DIR" ]; then
@@ -40,6 +41,7 @@ fi
 # ─── Normal launch: start server + open browser ───
 export PATH="$RESOURCES_DIR:$PATH"
 export VIDEOMASA_WORK_DIR="$WORK_DIR"
+export VIDEOMASA_COOKIES_DIR="$COOKIES_DIR"
 export VIDEOMASA_OPEN_BROWSER="1"
 export VIDEOMASA_PORT="$PORT"
 

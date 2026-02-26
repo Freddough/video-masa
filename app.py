@@ -38,8 +38,9 @@ WORK_DIR.mkdir(exist_ok=True)
 
 ALLOWED_COOKIES_BROWSERS = ("none", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi", "chromium")
 
-# Persistent cookie storage (outside WORK_DIR so it survives cleanup)
-COOKIES_DIR = Path(__file__).resolve().parent / "cookies"
+# Persistent cookie storage — packaged app sets VIDEOMASA_COOKIES_DIR to ~/.videomasa/cookies/
+# so cookies survive app upgrades. In dev mode, falls back to ./cookies/.
+COOKIES_DIR = Path(os.environ.get("VIDEOMASA_COOKIES_DIR", Path(__file__).resolve().parent / "cookies"))
 COOKIES_DIR.mkdir(exist_ok=True)
 
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }

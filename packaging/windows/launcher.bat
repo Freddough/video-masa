@@ -5,6 +5,7 @@ REM Handles first-run setup detection, server startup, and browser opening.
 set VM_HOME=%USERPROFILE%\.videomasa
 set VENV_DIR=%VM_HOME%\venv
 set WORK_DIR=%VM_HOME%\downloads
+set COOKIES_DIR=%VM_HOME%\cookies
 set PID_FILE=%VM_HOME%\server.pid
 set PORT=8080
 set SCRIPT_DIR=%~dp0
@@ -12,6 +13,7 @@ set SCRIPT_DIR=%~dp0
 REM ─── Create home directory ───
 if not exist "%VM_HOME%" mkdir "%VM_HOME%"
 if not exist "%WORK_DIR%" mkdir "%WORK_DIR%"
+if not exist "%COOKIES_DIR%" mkdir "%COOKIES_DIR%"
 
 REM ─── First-run: no venv yet → run setup ───
 if not exist "%VENV_DIR%" (
@@ -22,6 +24,7 @@ if not exist "%VENV_DIR%" (
 REM ─── Normal launch: start server + open browser ───
 set PATH=%SCRIPT_DIR%;%PATH%
 set VIDEOMASA_WORK_DIR=%WORK_DIR%
+set VIDEOMASA_COOKIES_DIR=%COOKIES_DIR%
 set VIDEOMASA_OPEN_BROWSER=1
 set VIDEOMASA_PORT=%PORT%
 

@@ -47,10 +47,10 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-2.2.dmg
+# macOS — creates dist/VideoMasa-2.3.dmg
 bash packaging/macos/build_dmg.sh
 
-# Windows — creates dist/VideoMasa-2.2-Windows.zip
+# Windows — creates dist/VideoMasa-2.3-Windows.zip
 bash packaging/windows/build_zip.sh
 ```
 
@@ -77,6 +77,11 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v2.3
+
+- **DMG install experience** — opening the DMG now shows a branded dark background with an arrow and "Drag Video Masa into Applications" text, plus a custom Applications folder icon
+- **Persistent cookies** — cookie files now survive app upgrades by storing them in `~/.videomasa/cookies/` instead of inside the app bundle
 
 ## What's new in v2.2
 
