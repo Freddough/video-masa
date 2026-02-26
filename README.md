@@ -47,10 +47,10 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-2.1.dmg
+# macOS — creates dist/VideoMasa-2.2.dmg
 bash packaging/macos/build_dmg.sh
 
-# Windows — creates dist/VideoMasa-2.1-Windows.zip
+# Windows — creates dist/VideoMasa-2.2-Windows.zip
 bash packaging/windows/build_zip.sh
 ```
 
@@ -77,6 +77,11 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v2.2
+
+- **5-minute inactivity timeout** — app now waits 5 minutes (up from 90 seconds) before auto-shutting down
+- **Shutdown overlay** — when the app closes due to inactivity, the browser shows a friendly message explaining what happened and how to restart
 
 ## What's new in v2.1
 

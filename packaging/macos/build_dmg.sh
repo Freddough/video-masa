@@ -78,7 +78,7 @@ codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null && echo "  [+] Signed
 echo ""
 
 # ─── Create DMG ───
-DMG_NAME="VideoMasa-2.1.dmg"
+DMG_NAME="VideoMasa-2.2.dmg"
 echo "Creating DMG..."
 # Remove old DMG if present
 rm -f "$DIST_DIR/$DMG_NAME"
