@@ -45,10 +45,10 @@ COOKIES_DIR.mkdir(exist_ok=True)
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
 jobs = {}
 
-# Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 90s
+# Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 5 min
 import time
 _last_heartbeat = time.time()
-_HEARTBEAT_TIMEOUT = 90  # seconds
+_HEARTBEAT_TIMEOUT = 300  # seconds (5 minutes)
 
 
 def _find_whisper_json(source_path, job_id):
@@ -1008,7 +1008,7 @@ def shutdown():
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
-    """Browser pings this every 30s. If no ping for 90s, server auto-shuts down."""
+    """Browser pings this every 30s. If no ping for 5 min, server auto-shuts down."""
     global _last_heartbeat
     _last_heartbeat = time.time()
     return jsonify({"ok": True})
@@ -1019,7 +1019,7 @@ def _heartbeat_watchdog():
     while True:
         time.sleep(30)
         if time.time() - _last_heartbeat > _HEARTBEAT_TIMEOUT:
-            print("\nNo browser heartbeat for 90s — shutting down.")
+            print("\nNo browser heartbeat for 5 minutes — shutting down.")
             cleanup_downloads_dir()
             os.kill(os.getpid(), signal.SIGTERM)
             break

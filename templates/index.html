@@ -1878,11 +1878,38 @@
         }
 
         // ─── Heartbeat — tells server the browser tab is still open ───
+        let _heartbeatFails = 0;
         setInterval(() => {
-            fetch('/heartbeat', { method: 'POST' }).catch(() => {});
+            fetch('/heartbeat', { method: 'POST' })
+                .then(r => { if (r.ok) _heartbeatFails = 0; else _heartbeatFails++; })
+                .catch(() => { _heartbeatFails++; })
+                .finally(() => {
+                    if (_heartbeatFails >= 2) showShutdownOverlay();
+                });
         }, 30000);
         // Send first heartbeat immediately
         fetch('/heartbeat', { method: 'POST' }).catch(() => {});
+
+        function showShutdownOverlay() {
+            if (document.getElementById('shutdownOverlay')) return;
+            const overlay = document.createElement('div');
+            overlay.id = 'shutdownOverlay';
+            overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);display:flex;align-items:center;justify-content:center;text-align:center;';
+            overlay.innerHTML = `
+                <div style="max-width:400px;padding:32px;">
+                    <div style="font-size:36px;margin-bottom:16px;">⌘</div>
+                    <h2 style="color:var(--lime);font-size:18px;font-weight:600;margin:0 0 12px;">Video Masa closed</h2>
+                    <p style="color:var(--text-mid);font-size:14px;line-height:1.6;margin:0 0 20px;">
+                        The app shut down after 5 minutes of inactivity.<br>
+                        Downloaded files have been cleaned up to save space.
+                    </p>
+                    <p style="color:var(--text-dim);font-size:12px;margin:0;">
+                        To start again, reopen the app or run <code style="background:var(--surface-1);padding:2px 6px;border-radius:4px;font-size:11px;">python app.py</code>
+                    </p>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+        }
 
         // ─── Download with quality — spawns new job if quality differs from current ───
         async function downloadWithQuality(jobId, type) {
