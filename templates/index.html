@@ -15,8 +15,8 @@
             --border-hover: #35354a;
             --text: #eaeaf0;
             --text-mid: #a0a0b8;
-            --text-dim: #606078;
-            --text-faint: #3a3a50;
+            --text-dim: #8585a0;
+            --text-faint: #5a5a75;
             --lime: #c8ff00;
             --lime-dim: #c8ff0025;
             --lime-glow: #c8ff0012;
@@ -546,7 +546,8 @@
         .queue-empty .empty-icon {
             font-size: 24px;
             margin-bottom: 8px;
-            opacity: 0.4;
+            color: var(--lime);
+            opacity: 0.6;
         }
 
         /* ─── Job Cards ─── */
@@ -1054,15 +1055,13 @@
                 <div class="controls-row">
                     <div class="config-pair">
                         <span class="config-label">Cookies</span>
+                        <button id="cookieInfoBtn" title="How cookies work" style="background:none; border:1px solid var(--lime); border-radius:50%; color:var(--lime); font-size:11px; width:18px; height:18px; padding:0; cursor:pointer; display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; font-style:italic; font-family:Georgia,serif; line-height:1;">i</button>
                         <select class="config-select" id="cookiesSelect"
-                            title="Pass your browser's cookies to yt-dlp for sites that require login (like Twitter/X). Select the browser you're logged into to download protected content.">
+                            title="Pass your browser's cookies to yt-dlp for sites that require login (like Twitter/X). Select the browser you're logged into, or upload a cookies.txt file.">
                             <option value="none" selected>None</option>
-                            <option value="chrome">Chrome</option>
-                            <option value="firefox">Firefox</option>
-                            <option value="safari">Safari</option>
-                            <option value="edge">Edge</option>
-                            <option value="brave">Brave</option>
                         </select>
+                        <input type="file" id="cookieFileInput" accept=".txt" style="display:none">
+                        <button id="deleteCookieBtn" style="display:none; background:none; border:1px solid #633; border-radius:4px; color:#f66; font-size:11px; padding:2px 7px; cursor:pointer; white-space:nowrap;" title="Delete this saved cookie file">&times;</button>
                     </div>
                     <div class="config-divider"></div>
                     <div class="config-pair">
@@ -1109,11 +1108,75 @@
         <div class="footer">Runs locally via <span>Whisper</span> + <span>yt-dlp</span> — your data never leaves your machine</div>
     </div>
 
+    <!-- Cookie info modal -->
+    <div id="cookieInfoModal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.65); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
+        <div style="background:var(--surface-1); border:1px solid var(--border); border-radius:var(--radius-lg); max-width:480px; width:90%; padding:28px 28px 22px; position:relative; box-shadow:0 20px 60px rgba(0,0,0,.5);">
+            <button onclick="document.getElementById('cookieInfoModal').style.display='none'" style="position:absolute; top:12px; right:14px; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1;">&times;</button>
+            <h3 style="margin:0 0 16px; font-size:17px; color:var(--text); font-weight:600;">How Cookies Work</h3>
+
+            <div style="font-size:13px; color:var(--text-mid); line-height:1.6;">
+                <p style="margin:0 0 14px;"><strong style="color:var(--lime);">Browser Cookies</strong><br>
+                Select your browser (Chrome, Firefox, etc.) to let the app read your active login sessions directly. This works for most browsers on most systems, but may not work with Arc or other Chromium forks on macOS due to encryption restrictions.</p>
+
+                <p style="margin:0 0 14px;"><strong style="color:var(--lime);">Custom Cookies</strong><br>
+                Upload a cookies.txt file exported from your browser. These are saved by name and persist across sessions, even after the app restarts. Great for Arc users or anyone whose browser option doesn't work.</p>
+
+                <p style="margin:0 0 14px;"><strong style="color:var(--lime);">When to use cookies</strong><br>
+                Some sites (like X/Twitter) require a logged-in session to serve video. If a download fails with a login error, cookies will fix it.</p>
+
+                <p style="margin:0;"><strong style="color:var(--lime);">How to export cookies</strong><br>
+                Install a browser extension like <em>Get cookies.txt LOCALLY</em>, navigate to the site you need (e.g. x.com while logged in), click the extension, and export. Then select <em>Upload New&hellip;</em> in the Cookies dropdown.</p>
+            </div>
+        </div>
+    </div>
+
     <script>
         // ─── Prefs persistence ───
         const PREFS_KEY = 'videomasa_prefs';
 
-        function loadPrefs() {
+        async function populateCookieDropdown(selectValue) {
+            const sel = document.getElementById('cookiesSelect');
+            const delBtn = document.getElementById('deleteCookieBtn');
+            sel.innerHTML = '';
+
+            // None option
+            sel.appendChild(new Option('None', 'none'));
+
+            // Custom section (saved cookies + Upload New)
+            const custom = document.createElement('optgroup');
+            custom.label = 'Custom';
+            try {
+                const resp = await fetch('/saved-cookies');
+                const data = await resp.json();
+                if (data.cookies) {
+                    data.cookies.forEach(name => {
+                        custom.appendChild(new Option(name, `cookie:${name}`));
+                    });
+                }
+            } catch(e) {}
+            custom.appendChild(new Option('Upload New\u2026', '_upload_new'));
+            sel.appendChild(custom);
+
+            // Browser options
+            const browsers = document.createElement('optgroup');
+            browsers.label = 'Browser';
+            [['chrome','Chrome'],['firefox','Firefox'],['safari','Safari'],['edge','Edge'],['brave','Brave']].forEach(([val, lbl]) => {
+                browsers.appendChild(new Option(lbl, val));
+            });
+            sel.appendChild(browsers);
+
+            // Restore selection
+            if (selectValue) {
+                sel.value = selectValue;
+                if (sel.value !== selectValue) sel.value = 'none';
+            }
+
+            // Show/hide delete button
+            delBtn.style.display = sel.value.startsWith('cookie:') ? 'inline' : 'none';
+        }
+
+        async function loadPrefs() {
+            let savedCookie = 'none';
             try {
                 const s = localStorage.getItem(PREFS_KEY);
                 if (s) {
@@ -1122,9 +1185,10 @@
                     if (typeof p.download === 'boolean') document.getElementById('cbDownload').checked = p.download;
                     if (typeof p.autoPaste === 'boolean') document.getElementById('cbAutoPaste').checked = p.autoPaste;
                     if (p.model) document.getElementById('modelSelect').value = p.model;
-                    if (p.cookies_browser) document.getElementById('cookiesSelect').value = p.cookies_browser;
+                    if (p.cookies_browser) savedCookie = p.cookies_browser;
                 }
             } catch(e) {}
+            await populateCookieDropdown(savedCookie);
             updatePills();
         }
 
@@ -1152,7 +1216,68 @@
         document.getElementById('cbDownload').addEventListener('change', savePrefs);
         document.getElementById('cbAutoPaste').addEventListener('change', savePrefs);
         document.getElementById('modelSelect').addEventListener('change', savePrefs);
-        document.getElementById('cookiesSelect').addEventListener('change', savePrefs);
+        document.getElementById('cookiesSelect').addEventListener('change', function() {
+            const delBtn = document.getElementById('deleteCookieBtn');
+            if (this.value === '_upload_new') {
+                this.value = 'none';
+                delBtn.style.display = 'none';
+                // Open file picker immediately
+                document.getElementById('cookieFileInput').click();
+                return;
+            }
+            delBtn.style.display = this.value.startsWith('cookie:') ? 'inline' : 'none';
+            savePrefs();
+        });
+
+        document.getElementById('cookieFileInput').addEventListener('change', async function() {
+            const file = this.files[0];
+            this.value = '';
+            if (!file) return;
+
+            // File selected — now ask for a name
+            const name = prompt('Name this cookie file (e.g. "x.com_feb2026"):');
+            if (!name || !name.trim()) return;
+
+            const form = new FormData();
+            form.append('file', file);
+            form.append('name', name.trim());
+            try {
+                const resp = await fetch('/upload-cookies', { method: 'POST', body: form });
+                const data = await resp.json();
+                if (data.ok) {
+                    await populateCookieDropdown(`cookie:${data.name}`);
+                    savePrefs();
+                } else {
+                    alert('Cookie upload failed: ' + (data.error || 'unknown'));
+                }
+            } catch(e) {
+                alert('Cookie upload failed: ' + e.message);
+            }
+        });
+
+        document.getElementById('deleteCookieBtn').addEventListener('click', async function() {
+            const sel = document.getElementById('cookiesSelect');
+            if (!sel.value.startsWith('cookie:')) return;
+            const name = sel.value.slice(7);
+            if (!confirm(`Delete saved cookie "${name}"?`)) return;
+            try {
+                await fetch('/delete-cookies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name })
+                });
+            } catch(e) {}
+            await populateCookieDropdown('none');
+            savePrefs();
+        });
+
+        document.getElementById('cookieInfoBtn').addEventListener('click', () => {
+            document.getElementById('cookieInfoModal').style.display = 'flex';
+        });
+        document.getElementById('cookieInfoModal').addEventListener('click', function(e) {
+            if (e.target === this) this.style.display = 'none';
+        });
+
         loadPrefs();
 
         // ─── Drop zone ───
@@ -1844,8 +1969,11 @@
         function autoDownload(jobId, filename, format) {
             const endpoint = format === 'mp3' ? `/download-mp3/${jobId}` : `/download/${jobId}`;
             fetch(endpoint)
-                .then(resp => {
-                    if (!resp.ok) throw new Error('File not available');
+                .then(async resp => {
+                    if (!resp.ok) {
+                        const data = await resp.json().catch(() => null);
+                        throw new Error(data && data.error ? data.error : `Server error (${resp.status})`);
+                    }
                     return resp.blob();
                 })
                 .then(blob => {

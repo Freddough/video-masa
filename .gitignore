@@ -14,6 +14,9 @@ build/
 # Downloads directory (local video files)
 downloads/
 
+# Saved cookie files (user-specific, not committed)
+cookies/
+
 # OS files
 .DS_Store
 .DS_Store?

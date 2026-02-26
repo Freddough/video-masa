@@ -38,6 +38,10 @@ WORK_DIR.mkdir(exist_ok=True)
 
 ALLOWED_COOKIES_BROWSERS = ("none", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi", "chromium")
 
+# Persistent cookie storage (outside WORK_DIR so it survives cleanup)
+COOKIES_DIR = Path(__file__).resolve().parent / "cookies"
+COOKIES_DIR.mkdir(exist_ok=True)
+
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
 jobs = {}
 
@@ -47,18 +51,53 @@ _last_heartbeat = time.time()
 _HEARTBEAT_TIMEOUT = 90  # seconds
 
 
+def _find_whisper_json(source_path, job_id):
+    """Find whisper JSON output file, handling different naming conventions.
+    Some whisper versions create 'input.json', others 'input.mp4.json'."""
+    source = Path(source_path)
+    # 1. Standard: same stem with .json suffix (e.g. video.mp4 → video.json)
+    candidate = source.with_suffix(".json")
+    if candidate.exists():
+        return candidate
+    # 2. Appended: full filename + .json (e.g. video.mp4 → video.mp4.json)
+    candidate = source.parent / (source.name + ".json")
+    if candidate.exists():
+        return candidate
+    # 3. Fallback: search WORK_DIR for any .json starting with job_id
+    for f in WORK_DIR.iterdir():
+        if f.suffix == ".json" and f.name.startswith(job_id):
+            return f
+    # 4. Broader fallback: any .json containing the source stem
+    stem = source.stem
+    for f in WORK_DIR.iterdir():
+        if f.suffix == ".json" and stem in f.name:
+            return f
+    return None
+
+
 def _is_twitter_url(url):
     """Check if a URL is from Twitter/X."""
     return bool(re.match(r'https?://(www\.)?(twitter\.com|x\.com)/', url))
+
+
+def _cookie_args(cookies_browser="none"):
+    """Return yt-dlp cookie flags based on user selection."""
+    if cookies_browser.startswith("cookie:"):
+        name = cookies_browser[7:]
+        cookie_path = COOKIES_DIR / f"{name}.txt"
+        if cookie_path.exists():
+            return ["--cookies", str(cookie_path)]
+        return []
+    if cookies_browser not in ("none",):
+        return ["--cookies-from-browser", cookies_browser]
+    return []
 
 
 def _probe_formats(url, cookies_browser="none"):
     """Probe available formats for a URL using yt-dlp -j.
     Returns dict: {"video": [2160, 1080, ...], "audio": [130, 49, ...]}"""
     try:
-        cmd = ["yt-dlp", "-j", "--no-playlist", url]
-        if cookies_browser != "none":
-            cmd[1:1] = ["--cookies-from-browser", cookies_browser]
+        cmd = ["yt-dlp", "-j", "--no-playlist"] + _cookie_args(cookies_browser) + [url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return {"video": [], "audio": []}
@@ -93,10 +132,8 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         # Download thumbnail locally (remote CDN URLs expire/get blocked)
         try:
             thumb_cmd = ["yt-dlp", "--no-playlist", "--write-thumbnail",
-                         "--skip-download", "--convert-thumbnails", "jpg",
+                         "--skip-download", "--convert-thumbnails", "jpg"] + _cookie_args(cookies_browser) + [
                          "-o", str(WORK_DIR / f"{job_id}_thumb"), url]
-            if cookies_browser != "none":
-                thumb_cmd[1:1] = ["--cookies-from-browser", cookies_browser]
             thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
             subprocess.run(thumb_cmd, capture_output=True, text=True, timeout=15)
             if thumb_path.exists():
@@ -124,8 +161,7 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             "--merge-output-format", "mp4",
         ]
 
-        if cookies_browser != "none":
-            cmd.extend(["--cookies-from-browser", cookies_browser])
+        cmd.extend(_cookie_args(cookies_browser))
 
         if _is_twitter_url(url):
             cmd.extend(["--extractor-retries", "5"])
@@ -208,15 +244,9 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
                 return
 
             # Parse whisper JSON output
-            json_file = downloaded.with_suffix(".json")
-            if not json_file.exists():
-                # Try alternate naming
-                for f in WORK_DIR.iterdir():
-                    if f.name.startswith(job_id) and f.suffix == ".json":
-                        json_file = f
-                        break
+            json_file = _find_whisper_json(downloaded, job_id)
 
-            if json_file.exists():
+            if json_file:
                 with open(json_file) as jf:
                     data = json.load(jf)
                 job["transcript"] = data.get("text", "").strip()
@@ -234,9 +264,10 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
                 json_file.unlink(missing_ok=True)
                 job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
             else:
-                job["transcript"] = "Transcription completed but output not found."
+                stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
+                job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
                 job["timestamped"] = ""
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "done"}
+                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
 
         # Clean up other whisper output files
         for ext in ['.srt', '.vtt', '.txt', '.tsv']:
@@ -317,14 +348,9 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
                 job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "error"}
                 return
 
-            json_file = file_path.with_suffix(".json")
-            if not json_file.exists():
-                for f in WORK_DIR.iterdir():
-                    if f.name.startswith(job_id) and f.suffix == ".json":
-                        json_file = f
-                        break
+            json_file = _find_whisper_json(file_path, job_id)
 
-            if json_file.exists():
+            if json_file:
                 with open(json_file) as jf:
                     data = json.load(jf)
                 job["transcript"] = data.get("text", "").strip()
@@ -341,9 +367,10 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
                 json_file.unlink(missing_ok=True)
                 job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
             else:
-                job["transcript"] = "Transcription completed but output not found."
+                stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
+                job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
                 job["timestamped"] = ""
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "done"}
+                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
 
         for ext in ['.srt', '.vtt', '.txt', '.tsv']:
             cleanup = file_path.with_suffix(ext)
@@ -390,7 +417,7 @@ def process():
 
     if model_size not in ("tiny", "base", "small", "medium"):
         model_size = "base"
-    if cookies_browser not in ALLOWED_COOKIES_BROWSERS:
+    if not cookies_browser.startswith("cookie:") and cookies_browser not in ALLOWED_COOKIES_BROWSERS:
         cookies_browser = "none"
 
     if not url:
@@ -548,14 +575,9 @@ def merge_job(job_id):
                             job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
                             return
 
-                        json_file = downloaded.with_suffix(".json")
-                        if not json_file.exists():
-                            for f in WORK_DIR.iterdir():
-                                if f.name.startswith(job_id) and f.suffix == ".json":
-                                    json_file = f
-                                    break
+                        json_file = _find_whisper_json(downloaded, job_id)
 
-                        if json_file.exists():
+                        if json_file:
                             with open(json_file) as jf:
                                 jdata = json.load(jf)
                             job["transcript"] = jdata.get("text", "").strip()
@@ -570,8 +592,9 @@ def merge_job(job_id):
                             json_file.unlink(missing_ok=True)
                             job["transcripts"][merge_model] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
                         else:
-                            job["transcript"] = "Transcription completed but output not found."
-                            job["transcripts"][merge_model] = {"transcript": job["transcript"], "timestamped": "", "status": "done"}
+                            stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
+                            job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
+                            job["transcripts"][merge_model] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
 
                         for ext in ['.srt', '.vtt', '.txt', '.tsv']:
                             c = downloaded.with_suffix(ext)
@@ -645,14 +668,9 @@ def retranscribe(job_id):
                 job["transcripts"][rt_model] = {"transcript": "", "timestamped": "", "status": "error"}
                 return
 
-            json_file = downloaded.with_suffix(".json")
-            if not json_file.exists():
-                for f in WORK_DIR.iterdir():
-                    if f.name.startswith(job_id) and f.suffix == ".json":
-                        json_file = f
-                        break
+            json_file = _find_whisper_json(downloaded, job_id)
 
-            if json_file.exists():
+            if json_file:
                 with open(json_file) as jf:
                     jdata = json.load(jf)
                 transcript = jdata.get("text", "").strip()
@@ -667,7 +685,8 @@ def retranscribe(job_id):
                 json_file.unlink(missing_ok=True)
                 job["transcripts"][rt_model] = {"transcript": transcript, "timestamped": timestamped, "status": "done"}
             else:
-                job["transcripts"][rt_model] = {"transcript": "Output not found.", "timestamped": "", "status": "error"}
+                stderr_hint = (result.stderr or result.stdout or "")[:300]
+                job["transcripts"][rt_model] = {"transcript": f"Output not found. Whisper: {stderr_hint}" if stderr_hint else "Output not found.", "timestamped": "", "status": "error"}
 
             for ext in ['.srt', '.vtt', '.txt', '.tsv']:
                 c = downloaded.with_suffix(ext)
@@ -686,41 +705,90 @@ def retranscribe(job_id):
     return jsonify({"ok": True, "model": model})
 
 
+@app.route("/saved-cookies")
+def saved_cookies():
+    """List saved cookie files."""
+    names = sorted(f.stem for f in COOKIES_DIR.iterdir() if f.suffix == ".txt")
+    return jsonify({"cookies": names})
+
+
+@app.route("/upload-cookies", methods=["POST"])
+def upload_cookies():
+    """Accept a Netscape-format cookies.txt file with a user-chosen name."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"error": "No file selected"}), 400
+    raw_name = request.form.get("name", "").strip()
+    if not raw_name:
+        return jsonify({"error": "No name provided"}), 400
+    safe_name = secure_filename(raw_name)
+    if not safe_name:
+        return jsonify({"error": "Invalid name — use letters, numbers, dashes, or underscores"}), 400
+    # Strip .txt if user included it
+    if safe_name.lower().endswith(".txt"):
+        safe_name = safe_name[:-4]
+    f.save(str(COOKIES_DIR / f"{safe_name}.txt"))
+    return jsonify({"ok": True, "name": safe_name})
+
+
+@app.route("/delete-cookies", methods=["POST"])
+def delete_cookies():
+    """Remove a saved cookie file by name."""
+    data = request.json or {}
+    name = data.get("name", "")
+    if not name:
+        return jsonify({"error": "No name provided"}), 400
+    cookie_path = COOKIES_DIR / f"{name}.txt"
+    if cookie_path.exists():
+        cookie_path.unlink()
+    return jsonify({"ok": True})
+
+
 @app.route("/download/<job_id>")
 def download_file(job_id):
     job = jobs.get(job_id)
-    if not job or not job.get("download_ready"):
-        return jsonify({"error": "File not available"}), 404
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
 
-    filepath = job["download_path"]
-    filename = job["filename"]
+    filepath = job.get("download_path") or job.get("_file_path", "")
+    filename = job.get("filename", "")
 
-    if not Path(filepath).exists():
-        return jsonify({"error": "File no longer exists"}), 404
+    if not filepath or not Path(filepath).exists():
+        return jsonify({"error": "File no longer exists on disk"}), 404
 
-    return send_file(filepath, as_attachment=True, download_name=filename)
+    return send_file(filepath, as_attachment=True, download_name=filename or Path(filepath).name)
 
 
 @app.route("/download-mp3/<job_id>")
 def download_mp3(job_id):
     job = jobs.get(job_id)
-    if not job or not job.get("download_ready"):
-        return jsonify({"error": "File not available"}), 404
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
 
-    filepath = Path(job["download_path"])
+    # Try download_path first, fall back to _file_path (always set when file is downloaded)
+    file_path_str = job.get("download_path") or job.get("_file_path", "")
+    if not file_path_str:
+        return jsonify({"error": "No file path available"}), 404
+
+    filepath = Path(file_path_str)
     if not filepath.exists():
-        return jsonify({"error": "File no longer exists"}), 404
+        return jsonify({"error": "File no longer exists on disk"}), 404
 
     mp3_path = filepath.with_suffix(".mp3")
     if not mp3_path.exists():
-        result = subprocess.run(
-            [FFMPEG_BIN, "-i", str(filepath), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
-            capture_output=True, timeout=120
-        )
-        if result.returncode != 0:
-            return jsonify({"error": "MP3 conversion failed"}), 500
+        try:
+            result = subprocess.run(
+                [FFMPEG_BIN, "-i", str(filepath), "-vn", "-acodec", "libmp3lame", "-q:a", "2", str(mp3_path)],
+                capture_output=True, timeout=120
+            )
+            if result.returncode != 0:
+                return jsonify({"error": f"MP3 conversion failed: {result.stderr[:200] if result.stderr else 'unknown error'}"}), 500
+        except FileNotFoundError:
+            return jsonify({"error": "ffmpeg not found — required for MP3 conversion"}), 500
 
-    mp3_filename = Path(job["filename"]).with_suffix(".mp3").name
+    mp3_filename = Path(job.get("filename", filepath.stem)).with_suffix(".mp3").name
     return send_file(str(mp3_path), as_attachment=True, download_name=mp3_filename)
 
 
@@ -746,7 +814,7 @@ def redownload(job_id):
         return jsonify({"error": "Specify height, audio_bitrate, or audio_only"}), 400
 
     cookies_browser = data.get("cookies_browser", "none")
-    if cookies_browser not in ALLOWED_COOKIES_BROWSERS:
+    if not cookies_browser.startswith("cookie:") and cookies_browser not in ALLOWED_COOKIES_BROWSERS:
         cookies_browser = "none"
 
     # Determine quality label
@@ -804,8 +872,7 @@ def redownload(job_id):
             else:
                 cmd.extend(["-S", f"res:{height},vcodec:h264,acodec:aac", "--merge-output-format", "mp4"])
 
-            if cookies_browser != "none":
-                cmd.extend(["--cookies-from-browser", cookies_browser])
+            cmd.extend(_cookie_args(cookies_browser))
             if _is_twitter_url(url):
                 cmd.extend(["--extractor-retries", "5"])
 

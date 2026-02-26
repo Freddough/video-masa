@@ -47,10 +47,10 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-2.0.dmg
+# macOS — creates dist/VideoMasa-2.1.dmg
 bash packaging/macos/build_dmg.sh
 
-# Windows — creates dist/VideoMasa-2.0-Windows.zip
+# Windows — creates dist/VideoMasa-2.1-Windows.zip
 bash packaging/windows/build_zip.sh
 ```
 
@@ -77,6 +77,14 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v2.1
+
+- **Persistent cookie files** — upload and name cookie files that survive restarts; manage saved cookies from a dropdown
+- **Cookie info modal** — in-app guide explaining browser cookies, custom cookies, and how to export
+- **MP3 download fix** — resolved "File not available" error when downloading MP3
+- **Transcription fix** — resolved "output not found" error with robust Whisper output detection
+- **UI polish** — brighter label contrast, lime-green brand accents on empty state and info button
 
 ## What's new in v2.0
 
