@@ -9,6 +9,7 @@ import sys
 import uuid
 import json
 import atexit
+import shutil
 import signal
 import subprocess
 import threading
@@ -22,16 +23,29 @@ app = Flask(__name__)
 
 
 def _find_ffmpeg():
-    """Find ffmpeg: bundled in .app Resources, or system PATH."""
+    """Find ffmpeg: bundled in .app Resources, Homebrew, or system PATH."""
     # Check relative to this script (for .app bundle: ../Resources/ffmpeg)
     candidate = Path(__file__).resolve().parent.parent / "Resources" / "ffmpeg"
     if candidate.exists():
         return str(candidate)
-    # Fall back to system PATH
+    # Try resolving from PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    # Check common Homebrew / system locations
+    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+        if Path(p).exists():
+            return p
+    # Last resort — bare name (will fail at call-site with a clear error)
     return "ffmpeg"
 
 
 FFMPEG_BIN = _find_ffmpeg()
+
+# Ensure ffmpeg's directory is on PATH so that whisper (and yt-dlp) can find it
+_ffmpeg_dir = str(Path(FFMPEG_BIN).parent)
+if _ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
 WORK_DIR = Path(os.environ.get("VIDEOMASA_WORK_DIR", Path(__file__).parent / "downloads"))
 WORK_DIR.mkdir(exist_ok=True)
