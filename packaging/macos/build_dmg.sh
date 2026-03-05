@@ -78,7 +78,7 @@ codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null && echo "  [+] Signed
 echo ""
 
 # ─── Prepare DMG staging ───
-DMG_NAME="VideoMasa-2.5.dmg"
+DMG_NAME="VideoMasa-3.0.dmg"
 DMG_STAGING="$BUILD_DIR/dmg_staging"
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING/.background"

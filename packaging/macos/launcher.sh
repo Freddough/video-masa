@@ -15,7 +15,7 @@ VERSION_FILE="$VM_HOME/version"
 PORT=8080
 
 # App version — bump this with each release
-APP_VERSION="2.5"
+APP_VERSION="3.0"
 
 # ─── If server is already running, just open the browser ───
 if [ -f "$PID_FILE" ]; then
