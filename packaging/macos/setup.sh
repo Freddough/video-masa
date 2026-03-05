@@ -1,27 +1,46 @@
 #!/bin/bash
-# ─── Video Masa — First-Time Setup ───
-# Installs Python 3 if needed, creates a venv, and installs all dependencies.
+# ─── Video Masa — First-Time Setup / Upgrade ───
+# Installs Python 3.10+ if needed, creates a venv, and installs all dependencies.
+# Also runs on upgrade when the app version changes (old venv is wiped by launcher.sh).
 
 set -e
 
+# App version — must match launcher.sh
+APP_VERSION="2.4"
+
 echo ""
 echo "╔════════════════════════════════════════════╗"
-echo "║     Video Masa — First-Time Setup          ║"
+echo "║     Video Masa — Setup                     ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
 RESOURCES_DIR="$(cd "$(dirname "$0")" && pwd)"
 VM_HOME="$HOME/.videomasa"
 VENV_DIR="$VM_HOME/venv"
+VERSION_FILE="$VM_HOME/version"
 
-# ─── Find or install Python 3 ───
+# ─── Find or install Python 3.10+ ───
+# Whisper and urllib3 v2 require Python 3.10+ with OpenSSL 1.1.1+.
+# The macOS system Python 3.9 ships with LibreSSL and is too old.
+MIN_MINOR=10
+
 find_python() {
-    for candidate in python3 python; do
+    # Prefer well-known paths first (Homebrew, python.org framework), then generic
+    for candidate in \
+        /opt/homebrew/bin/python3 \
+        /usr/local/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
+        /Library/Frameworks/Python.framework/Versions/3.10/bin/python3 \
+        python3 python; do
         if command -v "$candidate" &>/dev/null; then
             version=$("$candidate" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+')
             major=$(echo "$version" | cut -d. -f1)
-            if [ "$major" = "3" ]; then
-                echo "$candidate"
+            minor=$(echo "$version" | cut -d. -f2)
+            if [ "$major" = "3" ] && [ "$minor" -ge "$MIN_MINOR" ]; then
+                # Resolve to absolute path so the venv is stable
+                command -v "$candidate"
                 return 0
             fi
         fi
@@ -32,7 +51,7 @@ find_python() {
 PYTHON=$(find_python || true)
 
 if [ -z "$PYTHON" ]; then
-    echo "Python 3 not found. Installing it now..."
+    echo "Python 3.10+ not found. Installing it now..."
     echo ""
 
     if command -v brew &>/dev/null; then
@@ -60,11 +79,11 @@ if [ -z "$PYTHON" ]; then
 
     # Re-detect after install
     # The python.org installer puts python3 in /usr/local/bin (Intel) or /Library/Frameworks/...
-    export PATH="/usr/local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:$PATH"
+    export PATH="/usr/local/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:$PATH"
     PYTHON=$(find_python || true)
 
     if [ -z "$PYTHON" ]; then
-        echo "ERROR: Python installation completed but python3 was not found."
+        echo "ERROR: Python 3.10+ installation completed but was not found on PATH."
         echo "Please restart your Terminal and try opening Video Masa again."
         echo ""
         read -rp "Press Enter to exit..."
@@ -100,6 +119,9 @@ echo "[3/3] Downloading default speech model (base, ~140 MB)..."
 python -c "import whisper; whisper.load_model('base')" 2>&1 | tail -1
 echo "       Done."
 echo ""
+
+# ─── Record installed version ───
+echo "$APP_VERSION" > "$VERSION_FILE"
 
 echo "╔════════════════════════════════════════════╗"
 echo "║     Setup complete! Launching app...       ║"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ─── Video Masa Launcher ───
-# Handles first-run setup detection, server startup, and browser opening.
+# Handles first-run setup detection, upgrades, server startup, and browser opening.
 set -e
 
 RESOURCES_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -11,7 +11,11 @@ WORK_DIR="$VM_HOME/downloads"
 COOKIES_DIR="$VM_HOME/cookies"
 PID_FILE="$VM_HOME/server.pid"
 LOG_FILE="$VM_HOME/server.log"
+VERSION_FILE="$VM_HOME/version"
 PORT=8080
+
+# App version — bump this with each release
+APP_VERSION="2.4"
 
 # ─── If server is already running, just open the browser ───
 if [ -f "$PID_FILE" ]; then
@@ -27,8 +31,33 @@ fi
 
 mkdir -p "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR"
 
-# ─── First-run: no venv yet → open Terminal with setup script ───
+# ─── Determine if setup is needed ───
+_needs_setup=false
+
 if [ ! -d "$VENV_DIR" ]; then
+    # No venv at all — first install
+    _needs_setup=true
+elif [ -f "$VENV_DIR/bin/python" ]; then
+    _py_minor=$("$VENV_DIR/bin/python" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+' | cut -d. -f2)
+    if [ -n "$_py_minor" ] && [ "$_py_minor" -lt 10 ]; then
+        # Venv was created with Python < 3.10 — too old
+        rm -rf "$VENV_DIR"
+        _needs_setup=true
+    fi
+fi
+
+# Check if app was upgraded since last setup
+if [ "$_needs_setup" = false ]; then
+    _installed_version=""
+    [ -f "$VERSION_FILE" ] && _installed_version=$(cat "$VERSION_FILE")
+    if [ "$_installed_version" != "$APP_VERSION" ]; then
+        # Version mismatch — wipe venv so setup reinstalls deps
+        rm -rf "$VENV_DIR"
+        _needs_setup=true
+    fi
+fi
+
+if [ "$_needs_setup" = true ]; then
     osascript <<EOF
 tell application "Terminal"
     activate
