@@ -71,9 +71,22 @@ fi
 
 echo ""
 
-# ─── Ad-hoc code sign ───
-echo "Code signing (ad-hoc)..."
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null && echo "  [+] Signed" || echo "  [ ] Signing skipped (codesign not available)"
+# ─── Code signing ───
+SIGN_ID="Developer ID Application: ALFREDO BURBANO (7MDBVKH2LV)"
+echo "Code signing with Developer ID..."
+
+# Sign embedded binaries first (inside-out)
+if [ -f "$APP_BUNDLE/Contents/Resources/ffmpeg" ]; then
+    codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/Resources/ffmpeg"
+    echo "  [+] Signed ffmpeg"
+fi
+
+# Sign the app bundle
+codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP_BUNDLE"
+echo "  [+] Signed app bundle"
+
+# Verify
+codesign --verify --verbose "$APP_BUNDLE" && echo "  [+] Signature verified" || { echo "  [!] Signature verification failed"; exit 1; }
 
 echo ""
 
@@ -194,9 +207,26 @@ hdiutil convert "$TEMP_DMG" \
 rm -f "$TEMP_DMG"
 rm -rf "$DMG_STAGING"
 
+# ─── Sign the DMG ───
+echo "Signing DMG..."
+codesign --force --sign "$SIGN_ID" "$DIST_DIR/$DMG_NAME"
+echo "  [+] DMG signed"
+
+# ─── Notarize ───
+echo ""
+echo "Submitting for notarization (this may take a few minutes)..."
+xcrun notarytool submit "$DIST_DIR/$DMG_NAME" \
+    --keychain-profile "VideoMasa" \
+    --wait
+
+echo ""
+echo "Stapling notarization ticket..."
+xcrun stapler staple "$DIST_DIR/$DMG_NAME"
+echo "  [+] Notarization complete"
+
 echo ""
 echo "════════════════════════════════════════════"
-echo "  Build complete!"
+echo "  Build complete! (signed + notarized)"
 echo "  DMG: dist/$DMG_NAME"
 echo "  App: build/macos/${APP_NAME}.app"
 echo "════════════════════════════════════════════"
