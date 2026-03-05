@@ -120,6 +120,37 @@ python -c "import whisper; whisper.load_model('base')" 2>&1 | tail -1
 echo "       Done."
 echo ""
 
+# ─── Verify installation ───
+echo "Verifying installation..."
+_verify_ok=true
+
+python -c "import flask; print('  ✓ Flask', flask.__version__)" 2>/dev/null || { echo "  ✗ Flask — import failed"; _verify_ok=false; }
+python -c "import whisper; print('  ✓ whisper')" 2>/dev/null || { echo "  ✗ whisper — import failed"; _verify_ok=false; }
+command -v yt-dlp &>/dev/null && echo "  ✓ yt-dlp $(yt-dlp --version)" || { echo "  ✗ yt-dlp — not found"; _verify_ok=false; }
+
+# Check ffmpeg (may be bundled in Resources or installed via Homebrew)
+if [ -x "$RESOURCES_DIR/ffmpeg" ]; then
+    echo "  ✓ ffmpeg (bundled)"
+elif command -v ffmpeg &>/dev/null; then
+    echo "  ✓ ffmpeg ($(ffmpeg -version 2>&1 | head -1))"
+else
+    echo "  ⚠ ffmpeg — not found (MP3 export will not work)"
+    echo "    Install with: brew install ffmpeg"
+fi
+
+echo ""
+
+if [ "$_verify_ok" = false ]; then
+    echo "╔════════════════════════════════════════════╗"
+    echo "║  ⚠  Some dependencies failed to install   ║"
+    echo "║  The app may not work correctly.           ║"
+    echo "║  Try deleting ~/.videomasa/venv and        ║"
+    echo "║  reopening the app to reinstall.           ║"
+    echo "╚════════════════════════════════════════════╝"
+    echo ""
+    read -rp "Press Enter to continue anyway..."
+fi
+
 # ─── Record installed version ───
 echo "$APP_VERSION" > "$VERSION_FILE"
 

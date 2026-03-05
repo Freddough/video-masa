@@ -47,6 +47,77 @@ _ffmpeg_dir = str(Path(FFMPEG_BIN).parent)
 if _ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
     os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
 
+# ─── Startup health checks ────────────────────────────────────
+# Run once at import time; results cached in _health for the /health endpoint.
+
+def _check_health():
+    """Verify all external dependencies are available. Returns dict of check results."""
+    checks = {}
+
+    # 1. ffmpeg
+    try:
+        r = subprocess.run([FFMPEG_BIN, "-version"], capture_output=True, text=True, timeout=5)
+        checks["ffmpeg"] = {"ok": r.returncode == 0, "path": FFMPEG_BIN,
+                            "detail": r.stdout.split("\n")[0] if r.returncode == 0 else r.stderr[:200]}
+    except FileNotFoundError:
+        checks["ffmpeg"] = {"ok": False, "path": FFMPEG_BIN, "detail": "Binary not found"}
+    except Exception as e:
+        checks["ffmpeg"] = {"ok": False, "path": FFMPEG_BIN, "detail": str(e)}
+
+    # 2. yt-dlp
+    ytdlp_bin = shutil.which("yt-dlp")
+    if ytdlp_bin:
+        try:
+            r = subprocess.run([ytdlp_bin, "--version"], capture_output=True, text=True, timeout=5)
+            checks["yt_dlp"] = {"ok": r.returncode == 0, "path": ytdlp_bin,
+                                "detail": r.stdout.strip() if r.returncode == 0 else r.stderr[:200]}
+        except Exception as e:
+            checks["yt_dlp"] = {"ok": False, "path": ytdlp_bin, "detail": str(e)}
+    else:
+        checks["yt_dlp"] = {"ok": False, "path": None, "detail": "Not found on PATH"}
+
+    # 3. whisper
+    whisper_bin = shutil.which("whisper")
+    if whisper_bin:
+        try:
+            r = subprocess.run([whisper_bin, "--help"], capture_output=True, text=True, timeout=5)
+            checks["whisper"] = {"ok": r.returncode == 0, "path": whisper_bin, "detail": "CLI available"}
+        except Exception as e:
+            checks["whisper"] = {"ok": False, "path": whisper_bin, "detail": str(e)}
+    else:
+        checks["whisper"] = {"ok": False, "path": None, "detail": "Not found on PATH"}
+
+    # 4. whisper Python import (catches broken installs where CLI exists but import fails)
+    try:
+        r = subprocess.run([sys.executable, "-c", "import whisper; print(whisper.__file__)"],
+                           capture_output=True, text=True, timeout=10)
+        checks["whisper_import"] = {"ok": r.returncode == 0,
+                                    "detail": "OK" if r.returncode == 0 else r.stderr.strip()[:300]}
+    except Exception as e:
+        checks["whisper_import"] = {"ok": False, "detail": str(e)}
+
+    # 5. Python version
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    checks["python"] = {"ok": sys.version_info >= (3, 10), "version": py_ver,
+                         "path": sys.executable}
+
+    checks["all_ok"] = all(c.get("ok", False) for c in checks.values())
+    return checks
+
+
+_health = _check_health()
+
+# Print startup health summary
+_failed = [k for k, v in _health.items() if k != "all_ok" and not v.get("ok")]
+if _failed:
+    print(f"\n⚠  Health check: {len(_failed)} issue(s) detected: {', '.join(_failed)}")
+    for k in _failed:
+        print(f"   • {k}: {_health[k].get('detail', 'unknown')}")
+    print()
+else:
+    print("\n✓  Health check: all dependencies OK\n")
+
+
 WORK_DIR = Path(os.environ.get("VIDEOMASA_WORK_DIR", Path(__file__).parent / "downloads"))
 WORK_DIR.mkdir(exist_ok=True)
 
@@ -253,8 +324,10 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             wresult = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
 
             if wresult.returncode != 0:
+                full_err = (wresult.stderr or wresult.stdout or "unknown error")
+                print(f"[whisper error] job={job_id} rc={wresult.returncode}\n{full_err}", flush=True)
                 job["status"] = "error"
-                job["message"] = f"Transcription failed: {wresult.stderr[:200]}"
+                job["message"] = f"Transcription failed: {full_err[:500]}"
                 job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "error"}
                 return
 
@@ -358,8 +431,10 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
             wresult = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
 
             if wresult.returncode != 0:
+                full_err = (wresult.stderr or wresult.stdout or "unknown error")
+                print(f"[whisper error] job={job_id} rc={wresult.returncode}\n{full_err}", flush=True)
                 job["status"] = "error"
-                job["message"] = f"Transcription failed: {wresult.stderr[:200]}"
+                job["message"] = f"Transcription failed: {full_err[:500]}"
                 job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "error"}
                 return
 
@@ -411,6 +486,12 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/health")
+def health():
+    """Return dependency health status. Frontend checks this on load."""
+    return jsonify(_health)
 
 
 @app.route("/thumb/<job_id>")

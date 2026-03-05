@@ -1890,6 +1890,26 @@
         // Send first heartbeat immediately
         fetch('/heartbeat', { method: 'POST' }).catch(() => {});
 
+        // ─── Health check — warn user about missing dependencies ───
+        fetch('/health').then(r => r.json()).then(h => {
+            if (h.all_ok) return;
+            const issues = [];
+            if (!h.ffmpeg?.ok)         issues.push('ffmpeg — needed for MP3 export and audio decoding');
+            if (!h.yt_dlp?.ok)         issues.push('yt-dlp — needed for downloading videos');
+            if (!h.whisper?.ok)        issues.push('whisper CLI — needed for transcription');
+            if (!h.whisper_import?.ok)  issues.push('whisper Python package — ' + (h.whisper_import?.detail || 'import failed'));
+            if (!h.python?.ok)         issues.push('Python ' + (h.python?.version || '') + ' — requires 3.10+');
+            if (!issues.length) return;
+            const banner = document.createElement('div');
+            banner.id = 'healthBanner';
+            banner.style.cssText = 'background:#2a1a00;border:1px solid #664400;border-radius:8px;padding:12px 16px;margin:0 0 16px;font-size:13px;line-height:1.6;color:#ffaa33;';
+            banner.innerHTML = '<strong style="color:#ffcc00;">⚠ Dependency issues detected</strong><br>'
+                + issues.map(i => '• ' + i).join('<br>')
+                + '<br><span style="color:#997733;font-size:12px;">Some features may not work. Reinstall the app or run setup again.</span>';
+            const main = document.querySelector('.main-card') || document.querySelector('.container') || document.body.firstElementChild;
+            main.parentNode.insertBefore(banner, main);
+        }).catch(() => {});
+
         function showShutdownOverlay() {
             if (document.getElementById('shutdownOverlay')) return;
             const overlay = document.createElement('div');
