@@ -6,7 +6,7 @@
 set -e
 
 # App version — must match launcher.sh
-APP_VERSION="2.4"
+APP_VERSION="2.5"
 
 echo ""
 echo "╔════════════════════════════════════════════╗"

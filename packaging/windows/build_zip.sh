@@ -45,7 +45,7 @@ fi
 echo ""
 
 # ─── Create ZIP ───
-ZIP_NAME="VideoMasa-2.4-Windows.zip"
+ZIP_NAME="VideoMasa-2.5-Windows.zip"
 rm -f "$DIST_DIR/$ZIP_NAME"
 cd "$PROJECT_DIR/build/windows"
 zip -r "$DIST_DIR/$ZIP_NAME" "VideoMasa" -x "*.DS_Store"
