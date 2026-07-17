@@ -8,6 +8,9 @@ import re
 import sys
 import uuid
 import json
+import hmac
+import secrets
+import logging
 import atexit
 import shutil
 import signal
@@ -15,19 +18,68 @@ import subprocess
 import threading
 import mimetypes
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
 from werkzeug.utils import secure_filename
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 
+os.umask(0o077)
 app = Flask(__name__)
 
 
+def _read_app_version():
+    for candidate in (
+        Path(__file__).resolve().parent / "VERSION",
+        Path(__file__).resolve().parent.parent / "VERSION",
+    ):
+        if candidate.is_file():
+            return candidate.read_text().strip()
+    return "3.0.1"
+
+
+APP_VERSION = _read_app_version()
+APP_PORT = int(os.environ.get("VIDEOMASA_PORT", 8080))
+CONFIGURED_API_TOKEN = os.environ.get("VIDEOMASA_API_TOKEN")
+API_TOKEN = CONFIGURED_API_TOKEN or secrets.token_urlsafe(32)
+SESSION_COOKIE_NAME = "videomasa_session"
+MAX_UPLOAD_BYTES = int(os.environ.get("VIDEOMASA_MAX_UPLOAD_BYTES", 4 * 1024 * 1024 * 1024))
+MAX_COOKIE_BYTES = int(os.environ.get("VIDEOMASA_MAX_COOKIE_BYTES", 10 * 1024 * 1024))
+MAX_URL_LENGTH = int(os.environ.get("VIDEOMASA_MAX_URL_LENGTH", 4096))
+MAX_WORKERS = int(os.environ.get("VIDEOMASA_MAX_WORKERS", 2))
+MAX_PENDING_JOBS = int(os.environ.get("VIDEOMASA_MAX_PENDING_JOBS", 8))
+MAX_RETAINED_JOBS = int(os.environ.get("VIDEOMASA_MAX_RETAINED_JOBS", 100))
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+
+
+class _RedactLaunchToken(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                re.sub(r"([?&]token=)[^&\s\"]+", r"\1[REDACTED]", value)
+                if isinstance(value, str) else value
+                for value in record.args
+            )
+        return True
+
+
+logging.getLogger("werkzeug").addFilter(_RedactLaunchToken())
+
+
 def _find_ffmpeg():
-    """Find ffmpeg: bundled in .app Resources, Homebrew, or system PATH."""
+    """Find ffmpeg: bundled in .app, pinned Python runtime, or system PATH."""
     # Check relative to this script (for .app bundle: ../Resources/ffmpeg)
     candidate = Path(__file__).resolve().parent.parent / "Resources" / "ffmpeg"
     if candidate.exists():
         return str(candidate)
+    # Desktop setup installs an architecture-specific binary with imageio-ffmpeg.
+    try:
+        import imageio_ffmpeg
+        candidate = Path(imageio_ffmpeg.get_ffmpeg_exe())
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    except (ImportError, RuntimeError):
+        pass
     # Try resolving from PATH
     found = shutil.which("ffmpeg")
     if found:
@@ -36,7 +88,7 @@ def _find_ffmpeg():
     for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
         if Path(p).exists():
             return p
-    # Last resort — bare name (will fail at call-site with a clear error)
+    # Last resort — bare name (will fail at the call site with a clear error)
     return "ffmpeg"
 
 
@@ -79,11 +131,8 @@ def _check_health():
     # 3. whisper
     whisper_bin = shutil.which("whisper")
     if whisper_bin:
-        try:
-            r = subprocess.run([whisper_bin, "--help"], capture_output=True, text=True, timeout=5)
-            checks["whisper"] = {"ok": r.returncode == 0, "path": whisper_bin, "detail": "CLI available"}
-        except Exception as e:
-            checks["whisper"] = {"ok": False, "path": whisper_bin, "detail": str(e)}
+        checks["whisper"] = {"ok": os.access(whisper_bin, os.X_OK), "path": whisper_bin,
+                             "detail": "CLI executable found"}
     else:
         checks["whisper"] = {"ok": False, "path": None, "detail": "Not found on PATH"}
 
@@ -105,7 +154,10 @@ def _check_health():
     return checks
 
 
-_health = _check_health()
+if os.environ.get("VIDEOMASA_SKIP_HEALTH_CHECKS") == "1":
+    _health = {"all_ok": True}
+else:
+    _health = _check_health()
 
 # Print startup health summary
 _failed = [k for k, v in _health.items() if k != "all_ok" and not v.get("ok")]
@@ -119,17 +171,127 @@ else:
 
 
 WORK_DIR = Path(os.environ.get("VIDEOMASA_WORK_DIR", Path(__file__).parent / "downloads"))
-WORK_DIR.mkdir(exist_ok=True)
+WORK_DIR.mkdir(parents=True, exist_ok=True)
+WORK_DIR.chmod(0o700)
 
 ALLOWED_COOKIES_BROWSERS = ("none", "chrome", "firefox", "safari", "edge", "brave", "opera", "vivaldi", "chromium")
 
 # Persistent cookie storage — packaged app sets VIDEOMASA_COOKIES_DIR to ~/.videomasa/cookies/
 # so cookies survive app upgrades. In dev mode, falls back to ./cookies/.
 COOKIES_DIR = Path(os.environ.get("VIDEOMASA_COOKIES_DIR", Path(__file__).resolve().parent / "cookies"))
-COOKIES_DIR.mkdir(exist_ok=True)
+COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+COOKIES_DIR.chmod(0o700)
+for _cookie_file in COOKIES_DIR.glob("*.txt"):
+    if _cookie_file.is_file() and not _cookie_file.is_symlink():
+        _cookie_file.chmod(0o600)
 
 # Job store: { job_id: { status, message, transcript, timestamped, download_ready, download_path, filename, ... } }
 jobs = {}
+jobs_lock = threading.RLock()
+job_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="videomasa")
+job_task_slots = threading.BoundedSemaphore(MAX_PENDING_JOBS)
+
+
+def _shutdown_executor():
+    job_executor.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(_shutdown_executor)
+
+
+def _constant_time_token_match(candidate):
+    return bool(candidate) and hmac.compare_digest(str(candidate), API_TOKEN)
+
+
+def _request_host_is_local():
+    try:
+        parsed = urlsplit(f"//{request.host}")
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    return hostname in {"127.0.0.1", "localhost", "::1"} and port in (None, APP_PORT)
+
+
+def _request_origin_is_local():
+    origin = request.headers.get("Origin")
+    if not origin:
+        return True
+    try:
+        parsed = urlsplit(origin)
+        hostname = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and hostname in {"127.0.0.1", "localhost", "::1"}
+        and port == APP_PORT
+    )
+
+
+@app.before_request
+def protect_local_api():
+    """Require the per-launch secret and reject cross-site/host-confused requests."""
+    if not _request_host_is_local():
+        return jsonify({"error": "Invalid Host header"}), 403
+
+    launch_token = request.args.get("token") if request.endpoint == "index" else None
+    if request.method == "GET" and request.endpoint == "index" and _constant_time_token_match(launch_token):
+        return None
+
+    supplied_token = request.headers.get("X-Video-Masa-Token") or request.cookies.get(SESSION_COOKIE_NAME)
+    if not _constant_time_token_match(supplied_token):
+        return jsonify({"error": "Unauthorized local request"}), 403
+
+    if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        if request.headers.get("Sec-Fetch-Site") == "cross-site" or not _request_origin_is_local():
+            return jsonify({"error": "Cross-site request rejected"}), 403
+
+
+@app.errorhandler(413)
+def request_too_large(_error):
+    return jsonify({"error": f"Upload exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit"}), 413
+
+
+def _prune_terminal_jobs_locked():
+    if len(jobs) < MAX_RETAINED_JOBS:
+        return
+    for job_id, job in list(jobs.items()):
+        if job.get("status") in {"done", "error"}:
+            jobs.pop(job_id, None)
+        if len(jobs) < MAX_RETAINED_JOBS:
+            break
+
+
+def _add_job(job_id, job):
+    with jobs_lock:
+        _prune_terminal_jobs_locked()
+        pending = sum(item.get("status") not in {"done", "error"} for item in jobs.values())
+        if pending >= MAX_PENDING_JOBS:
+            return False, f"Too many jobs are queued or running (limit: {MAX_PENDING_JOBS})"
+        if len(jobs) >= MAX_RETAINED_JOBS:
+            return False, f"Too many retained jobs (limit: {MAX_RETAINED_JOBS}); clear finished jobs and retry"
+        jobs[job_id] = job
+    return True, ""
+
+
+def _submit_job(function, *args):
+    if not job_task_slots.acquire(blocking=False):
+        return False
+
+    def run_and_release():
+        try:
+            function(*args)
+        finally:
+            job_task_slots.release()
+
+    try:
+        job_executor.submit(run_and_release)
+    except RuntimeError:
+        job_task_slots.release()
+        return False
+    return True
 
 # Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 5 min
 import time
@@ -166,12 +328,49 @@ def _is_twitter_url(url):
     return bool(re.match(r'https?://(www\.)?(twitter\.com|x\.com)/', url))
 
 
+COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _cookie_path(name):
+    """Return a contained cookie path for a strict server-side cookie ID."""
+    if not isinstance(name, str):
+        return None
+    normalized = name.strip()
+    if normalized.lower().endswith(".txt"):
+        normalized = normalized[:-4]
+    if not COOKIE_NAME_RE.fullmatch(normalized):
+        return None
+    candidate = (COOKIES_DIR / f"{normalized}.txt").resolve()
+    try:
+        candidate.relative_to(COOKIES_DIR.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _validated_url(value):
+    if not isinstance(value, str):
+        return None, "No URL provided"
+    url = value.strip()
+    if not url:
+        return None, "No URL provided"
+    if len(url) > MAX_URL_LENGTH:
+        return None, f"URL exceeds the {MAX_URL_LENGTH}-character limit"
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None, "Invalid URL"
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None, "Only http:// and https:// URLs are supported"
+    return url, ""
+
+
 def _cookie_args(cookies_browser="none"):
     """Return yt-dlp cookie flags based on user selection."""
     if cookies_browser.startswith("cookie:"):
         name = cookies_browser[7:]
-        cookie_path = COOKIES_DIR / f"{name}.txt"
-        if cookie_path.exists():
+        cookie_path = _cookie_path(name)
+        if cookie_path and cookie_path.is_file() and not cookie_path.is_symlink():
             return ["--cookies", str(cookie_path)]
         return []
     if cookies_browser not in ("none",):
@@ -183,7 +382,7 @@ def _probe_formats(url, cookies_browser="none"):
     """Probe available formats for a URL using yt-dlp -j.
     Returns dict: {"video": [2160, 1080, ...], "audio": [130, 49, ...]}"""
     try:
-        cmd = ["yt-dlp", "-j", "--no-playlist"] + _cookie_args(cookies_browser) + [url]
+        cmd = ["yt-dlp", "-j", "--no-playlist"] + _cookie_args(cookies_browser) + ["--", url]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             return {"video": [], "audio": []}
@@ -219,7 +418,7 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         try:
             thumb_cmd = ["yt-dlp", "--no-playlist", "--write-thumbnail",
                          "--skip-download", "--convert-thumbnails", "jpg"] + _cookie_args(cookies_browser) + [
-                         "-o", str(WORK_DIR / f"{job_id}_thumb"), url]
+                         "-o", str(WORK_DIR / f"{job_id}_thumb"), "--", url]
             thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
             subprocess.run(thumb_cmd, capture_output=True, text=True, timeout=15)
             if thumb_path.exists():
@@ -252,7 +451,7 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         if _is_twitter_url(url):
             cmd.extend(["--extractor-retries", "5"])
 
-        cmd.append(url)
+        cmd.extend(["--", url])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
         # Collect probe results (wait up to 5s if still running)
@@ -485,13 +684,26 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
 
 @app.route("/")
 def index():
+    launch_token = request.args.get("token")
+    if launch_token:
+        if not _constant_time_token_match(launch_token):
+            return jsonify({"error": "Invalid launch token"}), 403
+        response = redirect(url_for("index"))
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            API_TOKEN,
+            httponly=True,
+            samesite="Strict",
+            secure=False,
+        )
+        return response
     return render_template("index.html")
 
 
 @app.route("/health")
 def health():
     """Return dependency health status. Frontend checks this on load."""
-    return jsonify(_health)
+    return jsonify({**_health, "app_version": APP_VERSION})
 
 
 @app.route("/thumb/<job_id>")
@@ -504,8 +716,12 @@ def thumb(job_id):
 
 @app.route("/process", methods=["POST"])
 def process():
-    data = request.json
-    url = data.get("url", "").strip()
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    data = request.get_json(silent=True) or {}
+    url, url_error = _validated_url(data.get("url", ""))
+    if url_error:
+        return jsonify({"error": url_error}), 400
     model_size = data.get("model", "base")
     do_transcribe = data.get("transcribe", True)
     do_download = data.get("download", False)
@@ -516,14 +732,11 @@ def process():
     if not cookies_browser.startswith("cookie:") and cookies_browser not in ALLOWED_COOKIES_BROWSERS:
         cookies_browser = "none"
 
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
-
     if not do_transcribe and not do_download:
         return jsonify({"error": "Select at least one action (Transcribe or Download)"}), 400
 
     job_id = uuid.uuid4().hex[:12]
-    jobs[job_id] = {
+    job = {
         "status": "queued",
         "message": "Queued...",
         "transcript": "",
@@ -543,9 +756,13 @@ def process():
         "file_status": "absent",
     }
 
-    thread = threading.Thread(target=run_job, args=(job_id, url, model_size, do_transcribe, do_download, cookies_browser))
-    thread.daemon = True
-    thread.start()
+    added, error = _add_job(job_id, job)
+    if not added:
+        return jsonify({"error": error}), 429
+    if not _submit_job(run_job, job_id, url, model_size, do_transcribe, do_download, cookies_browser):
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        return jsonify({"error": "Job queue is full or shutting down"}), 503
 
     return jsonify({"job_id": job_id})
 
@@ -555,6 +772,8 @@ ALLOWED_EXTENSIONS = {'.mp4', '.mov', '.webm', '.mkv', '.mp3', '.wav', '.m4a', '
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    if request.content_length and request.content_length > MAX_UPLOAD_BYTES:
+        return jsonify({"error": f"Upload exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit"}), 413
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
@@ -581,7 +800,7 @@ def upload():
     saved_path = WORK_DIR / f"{job_id}_{safe_name}"
     file.save(str(saved_path))
 
-    jobs[job_id] = {
+    job = {
         "status": "queued",
         "message": "Queued...",
         "transcript": "",
@@ -599,19 +818,27 @@ def upload():
         "file_status": "absent",
     }
 
-    thread = threading.Thread(target=run_file_job, args=(job_id, saved_path, model_size, do_transcribe, do_download))
-    thread.daemon = True
-    thread.start()
+    added, error = _add_job(job_id, job)
+    if not added:
+        saved_path.unlink(missing_ok=True)
+        return jsonify({"error": error}), 429
+    if not _submit_job(run_file_job, job_id, saved_path, model_size, do_transcribe, do_download):
+        with jobs_lock:
+            jobs.pop(job_id, None)
+        saved_path.unlink(missing_ok=True)
+        return jsonify({"error": "Job queue is full or shutting down"}), 503
 
     return jsonify({"job_id": job_id})
 
 
 @app.route("/status/<job_id>")
 def status(job_id):
-    job = jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        public_job = {key: value for key, value in job.items() if not key.startswith("_")} if job else None
     if not job:
         return jsonify({"error": "Job not found"}), 404
-    return jsonify(job)
+    return jsonify(public_job)
 
 
 @app.route("/merge/<job_id>", methods=["POST"])
@@ -621,7 +848,9 @@ def merge_job(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    data = request.json
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    data = request.get_json(silent=True) or {}
     add_download = data.get("download", False)
     add_transcribe = data.get("transcribe", False)
     model_size = data.get("model", "base")
@@ -711,9 +940,11 @@ def merge_job(job_id):
                         job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
                         check_queue_and_cleanup()
 
-                t = threading.Thread(target=run_transcription)
-                t.daemon = True
-                t.start()
+                if not _submit_job(run_transcription):
+                    job["status"] = "error"
+                    job["message"] = "Job queue is full. Try again after another job finishes."
+                    job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
+                    return jsonify({"error": job["message"]}), 429
             else:
                 job["status"] = "error"
                 job["message"] = "File no longer exists for transcription."
@@ -728,7 +959,9 @@ def retranscribe(job_id):
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    data = request.json
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    data = request.get_json(silent=True) or {}
     model = data.get("model", "base")
     if model not in ("tiny", "base", "small", "medium"):
         model = "base"
@@ -794,9 +1027,9 @@ def retranscribe(job_id):
         except Exception as e:
             job["transcripts"][rt_model] = {"transcript": "", "timestamped": "", "status": "error"}
 
-    t = threading.Thread(target=do_retranscribe)
-    t.daemon = True
-    t.start()
+    if not _submit_job(do_retranscribe):
+        job["transcripts"].pop(model, None)
+        return jsonify({"error": "Job queue is full. Try again after another job finishes."}), 429
 
     return jsonify({"ok": True, "model": model})
 
@@ -804,13 +1037,22 @@ def retranscribe(job_id):
 @app.route("/saved-cookies")
 def saved_cookies():
     """List saved cookie files."""
-    names = sorted(f.stem for f in COOKIES_DIR.iterdir() if f.suffix == ".txt")
+    names = sorted(
+        f.stem
+        for f in COOKIES_DIR.iterdir()
+        if f.suffix == ".txt"
+        and f.is_file()
+        and not f.is_symlink()
+        and _cookie_path(f.stem) == f.resolve()
+    )
     return jsonify({"cookies": names})
 
 
 @app.route("/upload-cookies", methods=["POST"])
 def upload_cookies():
     """Accept a Netscape-format cookies.txt file with a user-chosen name."""
+    if request.content_length and request.content_length > MAX_COOKIE_BYTES:
+        return jsonify({"error": f"Cookie file exceeds the {MAX_COOKIE_BYTES // (1024 * 1024)} MB limit"}), 413
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     f = request.files["file"]
@@ -819,25 +1061,29 @@ def upload_cookies():
     raw_name = request.form.get("name", "").strip()
     if not raw_name:
         return jsonify({"error": "No name provided"}), 400
-    safe_name = secure_filename(raw_name)
-    if not safe_name:
+    if raw_name.lower().endswith(".txt"):
+        raw_name = raw_name[:-4]
+    cookie_path = _cookie_path(raw_name)
+    if cookie_path is None:
         return jsonify({"error": "Invalid name — use letters, numbers, dashes, or underscores"}), 400
-    # Strip .txt if user included it
-    if safe_name.lower().endswith(".txt"):
-        safe_name = safe_name[:-4]
-    f.save(str(COOKIES_DIR / f"{safe_name}.txt"))
-    return jsonify({"ok": True, "name": safe_name})
+    f.save(str(cookie_path))
+    cookie_path.chmod(0o600)
+    return jsonify({"ok": True, "name": cookie_path.stem})
 
 
 @app.route("/delete-cookies", methods=["POST"])
 def delete_cookies():
     """Remove a saved cookie file by name."""
-    data = request.json or {}
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    data = request.get_json(silent=True) or {}
     name = data.get("name", "")
     if not name:
         return jsonify({"error": "No name provided"}), 400
-    cookie_path = COOKIES_DIR / f"{name}.txt"
-    if cookie_path.exists():
+    cookie_path = _cookie_path(name)
+    if cookie_path is None:
+        return jsonify({"error": "Invalid cookie name"}), 400
+    if cookie_path.is_file() and not cookie_path.is_symlink():
         cookie_path.unlink()
     return jsonify({"ok": True})
 
@@ -901,7 +1147,9 @@ def redownload(job_id):
     if not url:
         return jsonify({"error": "No URL — file uploads cannot be re-downloaded"}), 400
 
-    data = request.json
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    data = request.get_json(silent=True) or {}
     height = data.get("height")          # int like 720, or None
     audio_only = data.get("audio_only", False)
     audio_bitrate = data.get("audio_bitrate")  # int like 130, or None
@@ -930,7 +1178,7 @@ def redownload(job_id):
         shutil.copy2(str(source_thumb), str(new_thumb))
         thumb_url = f"/thumb/{new_job_id}"
 
-    jobs[new_job_id] = {
+    new_job_data = {
         "status": "queued",
         "message": f"Downloading at {quality_label}...",
         "transcript": "",
@@ -950,6 +1198,10 @@ def redownload(job_id):
         "file_status": "absent",
     }
 
+    added, error = _add_job(new_job_id, new_job_data)
+    if not added:
+        new_thumb.unlink(missing_ok=True)
+        return jsonify({"error": error}), 429
     new_job = jobs[new_job_id]
 
     def do_redownload():
@@ -972,7 +1224,7 @@ def redownload(job_id):
             if _is_twitter_url(url):
                 cmd.extend(["--extractor-retries", "5"])
 
-            cmd.append(url)
+            cmd.extend(["--", url])
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
             if result.returncode != 0:
@@ -1016,8 +1268,11 @@ def redownload(job_id):
             new_job["message"] = f"Error: {str(e)}"
             check_queue_and_cleanup()
 
-    t = threading.Thread(target=do_redownload, daemon=True)
-    t.start()
+    if not _submit_job(do_redownload):
+        with jobs_lock:
+            jobs.pop(new_job_id, None)
+        new_thumb.unlink(missing_ok=True)
+        return jsonify({"error": "Job queue is full or shutting down"}), 503
 
     return jsonify({"ok": True, "new_job_id": new_job_id})
 
@@ -1124,13 +1379,15 @@ def _heartbeat_watchdog():
 if __name__ == "__main__":
     # Clean up any leftover files from a previous un-clean shutdown
     cleanup_downloads_dir()
-    port = int(os.environ.get("VIDEOMASA_PORT", 8080))
+    port = APP_PORT
+    launch_url = f"http://127.0.0.1:{port}/?token={API_TOKEN}"
     if os.environ.get("VIDEOMASA_OPEN_BROWSER", "").lower() in ("1", "true", "yes"):
-        threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+        threading.Timer(1.5, lambda: webbrowser.open(launch_url)).start()
     # Start heartbeat watchdog — auto-shuts down if browser tab is closed
     watchdog = threading.Thread(target=_heartbeat_watchdog, daemon=True)
     watchdog.start()
     print("\n" + "=" * 52)
-    print(f"  VIDEO TOOL running at http://localhost:{port}")
+    display_url = f"http://127.0.0.1:{port}" if CONFIGURED_API_TOKEN else launch_url
+    print(f"  VIDEO TOOL running at {display_url}")
     print("=" * 52 + "\n")
-    app.run(debug=False, port=port)
+    app.run(debug=False, host="127.0.0.1", port=port)

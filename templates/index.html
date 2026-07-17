@@ -1005,9 +1005,9 @@
     <div class="glow-orb"></div>
 
     <!-- Thumbnail Lightbox -->
-    <div class="thumb-overlay" id="thumbOverlay" onclick="closeThumb(event)">
+    <div class="thumb-overlay" id="thumbOverlay">
         <div class="thumb-overlay-inner">
-            <button class="thumb-overlay-close" onclick="closeThumb(event, true)">&times;</button>
+            <button class="thumb-overlay-close" id="thumbOverlayClose">&times;</button>
             <img class="thumb-overlay-img" id="thumbOverlayImg" src="" alt="Thumbnail">
             <a class="thumb-overlay-dl" id="thumbOverlayDl" href="" download="">&#8595; Save thumbnail</a>
         </div>
@@ -1020,7 +1020,7 @@
                 <div class="brand-dot"></div>
                 <div class="brand-name">Video Masa</div>
             </div>
-            <button class="quit-btn" onclick="quitApp()">Quit</button>
+            <button class="quit-btn" id="quitBtn">Quit</button>
         </div>
 
         <!-- Main Input Card -->
@@ -1033,7 +1033,7 @@
                 <input type="text" class="url-input" id="urlInput"
                     placeholder="Paste a YouTube, Instagram, TikTok, or any video URL"
                     spellcheck="false" autocomplete="off">
-                <button class="add-btn" id="addBtn" onclick="addJob()">+ Add</button>
+                <button class="add-btn" id="addBtn">+ Add</button>
             </div>
 
             <div class="controls-area">
@@ -1095,7 +1095,7 @@
         <!-- Queue -->
         <div class="queue-header" id="queueHeader" style="display:none;">
             <div class="queue-title">Queue</div>
-            <button class="clear-btn" onclick="clearDone()">Clear finished</button>
+            <button class="clear-btn" id="clearDoneBtn">Clear finished</button>
         </div>
 
         <div id="queueContainer">
@@ -1111,7 +1111,7 @@
     <!-- Cookie info modal -->
     <div id="cookieInfoModal" style="display:none; position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.65); backdrop-filter:blur(4px); align-items:center; justify-content:center;">
         <div style="background:var(--surface-1); border:1px solid var(--border); border-radius:var(--radius-lg); max-width:480px; width:90%; padding:28px 28px 22px; position:relative; box-shadow:0 20px 60px rgba(0,0,0,.5);">
-            <button onclick="document.getElementById('cookieInfoModal').style.display='none'" style="position:absolute; top:12px; right:14px; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1;">&times;</button>
+            <button id="cookieInfoClose" style="position:absolute; top:12px; right:14px; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1;">&times;</button>
             <h3 style="margin:0 0 16px; font-size:17px; color:var(--text); font-weight:600;">How Cookies Work</h3>
 
             <div style="font-size:13px; color:var(--text-mid); line-height:1.6;">
@@ -1137,7 +1137,7 @@
         async function populateCookieDropdown(selectValue) {
             const sel = document.getElementById('cookiesSelect');
             const delBtn = document.getElementById('deleteCookieBtn');
-            sel.innerHTML = '';
+            sel.replaceChildren();
 
             // None option
             sel.appendChild(new Option('None', 'none'));
@@ -1274,9 +1274,17 @@
         document.getElementById('cookieInfoBtn').addEventListener('click', () => {
             document.getElementById('cookieInfoModal').style.display = 'flex';
         });
+        document.getElementById('cookieInfoClose').addEventListener('click', () => {
+            document.getElementById('cookieInfoModal').style.display = 'none';
+        });
         document.getElementById('cookieInfoModal').addEventListener('click', function(e) {
             if (e.target === this) this.style.display = 'none';
         });
+        document.getElementById('addBtn').addEventListener('click', addJob);
+        document.getElementById('clearDoneBtn').addEventListener('click', clearDone);
+        document.getElementById('quitBtn').addEventListener('click', quitApp);
+        document.getElementById('thumbOverlay').addEventListener('click', closeThumb);
+        document.getElementById('thumbOverlayClose').addEventListener('click', event => closeThumb(event, true));
 
         loadPrefs();
 
@@ -1502,13 +1510,182 @@
             if (msgEl) msgEl.textContent = 'Status: ' + job.message;
         }
 
-        // ─── Render (DOM-persistent: card + content wrapper isolate ::before from reflows) ───
+        function makeEl(tag, className, text) {
+            const element = document.createElement(tag);
+            if (className) element.className = className;
+            if (text !== undefined) element.textContent = text;
+            return element;
+        }
+
+        function makeCopyIcon() {
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '12');
+            svg.setAttribute('height', '12');
+            svg.setAttribute('viewBox', '0 0 16 16');
+            svg.setAttribute('fill', 'none');
+            svg.setAttribute('stroke', 'currentColor');
+            svg.setAttribute('stroke-width', '1.5');
+            const rect = document.createElementNS(svg.namespaceURI, 'rect');
+            rect.setAttribute('x', '5.5');
+            rect.setAttribute('y', '5.5');
+            rect.setAttribute('width', '8');
+            rect.setAttribute('height', '8');
+            rect.setAttribute('rx', '1.5');
+            const path = document.createElementNS(svg.namespaceURI, 'path');
+            path.setAttribute('d', 'M10.5 5.5V3a1.5 1.5 0 0 0-1.5-1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h2.5');
+            svg.append(rect, path);
+            return svg;
+        }
+
+        function makeModelDropdown(job, idx, activeModel) {
+            const wrap = makeEl('div', 'model-badge-wrap');
+            const badge = makeEl('button', 'model-badge', mName(activeModel));
+            badge.type = 'button';
+            badge.addEventListener('click', event => toggleModelDropdown(event, idx));
+            const dropdown = makeEl('div', 'model-dropdown');
+            dropdown.id = `model-dropdown-${idx}`;
+            const fileGone = job.fileStatus === 'cleaned';
+
+            ['tiny', 'base', 'small', 'medium'].forEach(model => {
+                const entry = (job.transcripts || {})[model];
+                const done = entry && entry.status === 'done';
+                const working = entry && entry.status === 'transcribing';
+                const disabled = working || (fileGone && !done);
+                const button = makeEl('button', `model-dropdown-item${done ? ' done' : ''}`);
+                button.type = 'button';
+                button.disabled = !!disabled;
+                button.title = fileGone && !done ? 'File cleaned up — resubmit URL to use this model' : '';
+                button.append(document.createTextNode(`${mEmoji(model)} ${mName(model)}`));
+                if (done) button.append(makeEl('span', 'check', '✓'));
+                if (working) button.append(makeEl('span', 'working', '···'));
+                button.addEventListener('click', () => retranscribeModel(idx, model));
+                dropdown.appendChild(button);
+            });
+
+            wrap.append(badge, dropdown);
+            return wrap;
+        }
+
+        function makeTranscriptTabs(job, idx, models, activeModel) {
+            if (models.length <= 1) return null;
+            const tabs = makeEl('div', 'transcript-tabs');
+            models.forEach(model => {
+                const entry = job.transcripts[model];
+                const working = entry.status === 'transcribing';
+                const classes = ['transcript-tab'];
+                if (model === activeModel) classes.push('active');
+                if (working) classes.push('tab-working');
+                const button = makeEl('button', classes.join(' '), `${mName(model)}${working ? '...' : ''}`);
+                button.type = 'button';
+                button.addEventListener('click', () => switchTab(idx, model));
+                tabs.appendChild(button);
+            });
+            return tabs;
+        }
+
+        function makeDownloadResults(job) {
+            const block = makeEl('div', 'result-block');
+            const header = makeEl('div', 'result-header');
+            header.append(makeEl('span', 'result-title', 'File Ready'));
+            const row = makeEl('div', 'file-ready-row');
+            const formats = job.availableFormats || { video: [], audio: [] };
+
+            const addDownloadPair = (type, formatsList, suffix, label) => {
+                const pair = makeEl('div', 'file-ready-pair');
+                if (formatsList.length > 0) {
+                    const select = makeEl('select', 'quality-job-select');
+                    select.id = `${type === 'video' ? 'vq' : 'aq'}-${job.id}`;
+                    select.appendChild(new Option('Best', 'best', true, true));
+                    formatsList.forEach(value => select.appendChild(new Option(`${value}${suffix}`, String(value))));
+                    pair.appendChild(select);
+                }
+                const button = makeEl('button', 'dl-btn', `↓ ${label}`);
+                button.type = 'button';
+                button.addEventListener('click', () => downloadWithQuality(job.id, type));
+                pair.appendChild(button);
+                row.appendChild(pair);
+            };
+
+            addDownloadPair('video', formats.video || [], 'p', 'MP4');
+            addDownloadPair('audio', formats.audio || [], 'kbps', 'MP3');
+            block.append(header, row);
+            return block;
+        }
+
+        function makeTranscriptResults(job, idx) {
+            const models = Object.keys(job.transcripts || {});
+            const activeModel = job.activeTab || job.model;
+            const activeEntry = (job.transcripts || {})[activeModel];
+            const tabs = makeTranscriptTabs(job, idx, models, activeModel);
+            const block = makeEl('div', 'result-block');
+            const header = makeEl('div', 'result-header');
+
+            if (activeEntry && activeEntry.status === 'done' && activeEntry.transcript) {
+                header.append(makeEl('span', 'result-title', 'Transcript'));
+                block.appendChild(header);
+                if (tabs) block.appendChild(tabs);
+
+                const actions = makeEl('div', 'action-row-bar');
+                const isTimestamped = !!(job.showTimestamped || {})[activeModel];
+                const toggle = makeEl('button', 'toggle-ts', isTimestamped ? 'Plain' : 'Timestamps');
+                toggle.type = 'button';
+                toggle.addEventListener('click', () => toggleTs(idx, activeModel));
+                const copy = makeEl('button', 'copy-btn', 'Copy');
+                copy.type = 'button';
+                copy.addEventListener('click', () => copyText(`${job.id}_${activeModel}`, copy));
+                actions.append(toggle, copy, makeModelDropdown(job, idx, activeModel));
+                block.appendChild(actions);
+
+                const body = makeEl('div', `result-body${isTimestamped ? ' mono' : ''}`);
+                body.id = `result_${job.id}_${activeModel}`;
+                body.textContent = isTimestamped ? activeEntry.timestamped : activeEntry.transcript;
+                block.appendChild(body);
+                return block;
+            }
+
+            if (activeEntry && activeEntry.status === 'transcribing') {
+                const label = makeEl('span', 'transcript-working-label');
+                label.append(makeEl('span', 'dot dot-transcribing'), document.createTextNode('Transcribing Audio...'));
+                header.appendChild(label);
+                block.appendChild(header);
+                if (tabs) block.appendChild(tabs);
+                if (models.some(model => job.transcripts[model].status === 'done')) {
+                    const actions = makeEl('div', 'action-row-bar');
+                    actions.appendChild(makeModelDropdown(job, idx, activeModel));
+                    block.appendChild(actions);
+                }
+                const body = makeEl('div', 'result-body');
+                body.append(makeEl('div', 'transcript-working', 'Working...'));
+                block.appendChild(body);
+                return block;
+            }
+
+            if (models.length === 0 && job.status !== 'done' && job.status !== 'error') {
+                const isTranscribing = job.status === 'transcribing';
+                const label = makeEl('span', 'transcript-working-label');
+                label.append(
+                    makeEl('span', `dot ${isTranscribing ? 'dot-transcribing' : 'dot-queued'}`),
+                    document.createTextNode(isTranscribing ? 'Transcribing Audio...' : 'Transcript')
+                );
+                header.appendChild(label);
+                const body = makeEl('div', 'result-body');
+                body.append(makeEl('div', 'transcript-working', 'Working...'));
+                block.append(header, body);
+                return block;
+            }
+
+            return null;
+        }
+
+        // ─── Render (all job-controlled values are assigned through DOM properties/textContent) ───
         function renderQueue() {
             const container = document.getElementById('queueContainer');
             const header = document.getElementById('queueHeader');
 
             if (jobQueue.length === 0) {
-                container.innerHTML = '<div class="queue-empty"><div class="empty-icon">⌘</div>Add URLs or drop files above to start</div>';
+                const empty = makeEl('div', 'queue-empty');
+                empty.append(makeEl('div', 'empty-icon', '⌘'), document.createTextNode('Add URLs or drop files above to start'));
+                container.replaceChildren(empty);
                 header.style.display = 'none';
                 return;
             }
@@ -1549,9 +1726,6 @@
                     card.className = `job-card ${statusClass}`;
                 }
 
-                // Get or create the content wrapper.
-                // innerHTML is ONLY ever set on this wrapper, never on the card itself,
-                // so the card's ::before pseudo-element and its animation are never disrupted.
                 let cardBody = card.querySelector('.job-card-body');
                 if (!cardBody) {
                     cardBody = document.createElement('div');
@@ -1559,166 +1733,55 @@
                     card.appendChild(cardBody);
                 }
 
-                // ── Preserve existing thumbnail element to avoid flicker ──
                 const existingThumb = cardBody.querySelector('.job-thumb');
-
-                // ── Build badges ──
-                let badges = '';
-                if (job.doTranscribe) badges += '<span class="badge badge-t">Transcribe</span>';
-                if (job.doDownload) badges += '<span class="badge badge-d">Download</span>';
-                if (job.merged) badges += '<span class="badge badge-merged">Merged</span>';
-                if (job.downloadedQuality) badges += `<span class="badge badge-q">${esc(job.downloadedQuality)}</span>`;
-
-                // ── Build sections ──
-                let sections = '';
-
-                if (job.downloadReady) {
-                    const mp3Name = esc(job.filename).replace(/\.[^.]+$/, '.mp3');
-                    const fmts = job.availableFormats || {video: [], audio: []};
-                    const videoFmts = fmts.video || [];
-                    const audioFmts = fmts.audio || [];
-
-                    let videoDropdown = '';
-                    if (videoFmts.length > 0) {
-                        const opts = videoFmts.map(h => `<option value="${h}">${h}p</option>`).join('');
-                        videoDropdown = `<select class="quality-job-select" id="vq-${job.id}">
-                            <option value="best" selected>Best</option>
-                            ${opts}
-                        </select>`;
-                    }
-
-                    let audioDropdown = '';
-                    if (audioFmts.length > 0) {
-                        const opts = audioFmts.map(b => `<option value="${b}">${b}kbps</option>`).join('');
-                        audioDropdown = `<select class="quality-job-select" id="aq-${job.id}">
-                            <option value="best" selected>Best</option>
-                            ${opts}
-                        </select>`;
-                    }
-
-                    sections += `
-                        <div class="result-block">
-                            <div class="result-header">
-                                <span class="result-title">File Ready</span>
-                            </div>
-                            <div class="file-ready-row">
-                                <div class="file-ready-pair">
-                                    ${videoDropdown}
-                                    <button class="dl-btn" onclick="downloadWithQuality('${job.id}', 'video')">&#8595; MP4</button>
-                                </div>
-                                <div class="file-ready-pair">
-                                    ${audioDropdown}
-                                    <button class="dl-btn" onclick="downloadWithQuality('${job.id}', 'audio')">&#8595; MP3</button>
-                                </div>
-                            </div>
-                        </div>`;
+                const inner = makeEl('div', 'job-card-inner');
+                if (job.thumbnail) {
+                    const thumb = existingThumb || makeEl('img', 'job-thumb');
+                    thumb.src = job.thumbnail;
+                    thumb.alt = '';
+                    thumb.loading = 'lazy';
+                    if (!existingThumb) thumb.addEventListener('click', () => openThumb(job.thumbnail));
+                    inner.appendChild(thumb);
                 }
 
+                const content = makeEl('div', 'job-card-content');
+                const top = makeEl('div', 'job-top');
+                const label = makeEl('div', 'job-label', job.title || job.label);
+                label.title = job.url || job.label;
+                const badges = makeEl('div', 'job-badges');
+                if (job.doTranscribe) badges.append(makeEl('span', 'badge badge-t', 'Transcribe'));
+                if (job.doDownload) badges.append(makeEl('span', 'badge badge-d', 'Download'));
+                if (job.merged) badges.append(makeEl('span', 'badge badge-merged', 'Merged'));
+                if (job.downloadedQuality) badges.append(makeEl('span', 'badge badge-q', job.downloadedQuality));
+                top.append(label, badges);
+                content.appendChild(top);
+
+                if (job.title && job.url) {
+                    const titleRow = makeEl('div', 'job-title');
+                    titleRow.append(makeEl('span', 'job-url-text', job.label));
+                    const copyButton = makeEl('button', 'url-copy-btn');
+                    copyButton.type = 'button';
+                    copyButton.title = 'Copy link';
+                    copyButton.appendChild(makeCopyIcon());
+                    copyButton.addEventListener('click', () => copyUrl(job.url, copyButton));
+                    titleRow.appendChild(copyButton);
+                    content.appendChild(titleRow);
+                }
+
+                const status = makeEl('div', 'job-status');
+                status.append(makeEl('div', `dot ${dotClass}`), makeEl('span', 'job-msg', `Status: ${job.message}`));
+                content.appendChild(status);
+                inner.appendChild(content);
+
+                const bodyChildren = [inner];
+                const results = makeEl('div', 'job-results');
+                if (job.downloadReady) results.appendChild(makeDownloadResults(job));
                 if (job.doTranscribe) {
-                    const tModels = Object.keys(job.transcripts || {});
-                    const activeModel = job.activeTab || job.model;
-                    const activeEntry = (job.transcripts || {})[activeModel];
-                    const hasMultiple = tModels.length > 1;
-
-                    let tabsHTML = '';
-                    if (hasMultiple) {
-                        tabsHTML = '<div class="transcript-tabs">' + tModels.map(m => {
-                            const e = job.transcripts[m];
-                            const isActive = m === activeModel;
-                            const isWorking = e.status === 'transcribing';
-                            return `<button class="transcript-tab ${isActive ? 'active' : ''} ${isWorking ? 'tab-working' : ''}" onclick="switchTab(${idx}, '${m}')">${mName(m)}${isWorking ? '...' : ''}</button>`;
-                        }).join('') + '</div>';
-                    }
-
-                    const fileGone = job.fileStatus === 'cleaned';
-                    const modelDropdownHTML = `
-                        <div class="model-badge-wrap">
-                            <button class="model-badge" onclick="toggleModelDropdown(event, ${idx})">${mName(activeModel)}</button>
-                            <div class="model-dropdown" id="model-dropdown-${idx}">
-                                ${['tiny', 'base', 'small', 'medium'].map(m => {
-                                    const entry = (job.transcripts || {})[m];
-                                    const done = entry && entry.status === 'done';
-                                    const working = entry && entry.status === 'transcribing';
-                                    const disabled = working || (fileGone && !done);
-                                    const tooltip = (fileGone && !done) ? 'File cleaned up — resubmit URL to use this model' : '';
-                                    return `<button class="model-dropdown-item ${done ? 'done' : ''}" onclick="retranscribeModel(${idx}, '${m}')" ${disabled ? 'disabled' : ''} title="${tooltip}">${mEmoji(m)} ${mName(m)}${done ? ' <span class=check>✓</span>' : ''}${working ? ' <span class=working>···</span>' : ''}</button>`;
-                                }).join('')}
-                            </div>
-                        </div>`;
-
-                    if (activeEntry && activeEntry.status === 'done' && activeEntry.transcript) {
-                        const isTs = (job.showTimestamped || {})[activeModel];
-                        const bodyContent = isTs ? activeEntry.timestamped : activeEntry.transcript;
-                        const toggleLabel = isTs ? 'Plain' : 'Timestamps';
-                        sections += `
-                            <div class="result-block">
-                                <div class="result-header">
-                                    <span class="result-title">Transcript</span>
-                                </div>
-                                ${tabsHTML}
-                                <div class="action-row-bar">
-                                    <button class="toggle-ts" onclick="toggleTs(${idx}, '${activeModel}')">${toggleLabel}</button>
-                                    <button class="copy-btn" onclick="copyText('${job.id}_${activeModel}', this)">Copy</button>
-                                    ${modelDropdownHTML}
-                                </div>
-                                <div class="result-body ${isTs ? 'mono' : ''}" id="result_${job.id}_${activeModel}">${esc(bodyContent)}</div>
-                            </div>`;
-                    } else if (activeEntry && activeEntry.status === 'transcribing') {
-                        sections += `
-                            <div class="result-block">
-                                <div class="result-header">
-                                    <span class="transcript-working-label"><span class="dot dot-transcribing"></span>Transcribing Audio...</span>
-                                </div>
-                                ${tabsHTML}
-                                ${tModels.some(m => job.transcripts[m].status === 'done') ? '<div class="action-row-bar">' + modelDropdownHTML + '</div>' : ''}
-                                <div class="result-body">
-                                    <div class="transcript-working">Working...</div>
-                                </div>
-                            </div>`;
-                    } else if (tModels.length === 0 && job.status !== 'done' && job.status !== 'error') {
-                        const isTranscribing = job.status === 'transcribing';
-                        const headerLabel = isTranscribing
-                            ? '<span class="transcript-working-label"><span class="dot dot-transcribing"></span>Transcribing Audio...</span>'
-                            : '<span class="transcript-working-label"><span class="dot dot-queued"></span>Transcript</span>';
-                        sections += `
-                            <div class="result-block">
-                                <div class="result-header">${headerLabel}</div>
-                                <div class="result-body">
-                                    <div class="transcript-working">Working...</div>
-                                </div>
-                            </div>`;
-                    }
+                    const transcriptResults = makeTranscriptResults(job, idx);
+                    if (transcriptResults) results.appendChild(transcriptResults);
                 }
-
-                const resultsHTML = sections ? `<div class="job-results">${sections}</div>` : '';
-
-                const thumbHTML = job.thumbnail
-                    ? `<img class="job-thumb" src="${esc(job.thumbnail)}" alt="" loading="lazy" onclick="openThumb('${esc(job.thumbnail)}')">`
-                    : '';
-
-                // ── Update content wrapper only — card div is never touched ──
-                cardBody.innerHTML = `
-                    <div class="job-card-inner">
-                        ${thumbHTML}
-                        <div class="job-card-content">
-                            <div class="job-top">
-                                <div class="job-label" title="${esc(job.url || job.label)}">${esc(job.title || job.label)}</div>
-                                <div class="job-badges">${badges}</div>
-                            </div>
-                            ${job.title && job.url ? `<div class="job-title"><span class="job-url-text">${esc(job.label)}</span><button class="url-copy-btn" title="Copy link" onclick="copyUrl('${esc(job.url)}', this)"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3a1.5 1.5 0 0 0-1.5-1.5H3A1.5 1.5 0 0 0 1.5 3v6A1.5 1.5 0 0 0 3 10.5h2.5"/></svg></button></div>` : ''}
-                            <div class="job-status">
-                                <div class="dot ${dotClass}"></div>
-                                <span class="job-msg">Status: ${esc(job.message)}</span>
-                            </div>
-                        </div>
-                    </div>
-                    ${resultsHTML}`;
-
-                // Restore preserved thumbnail so the img element is never recreated
-                if (existingThumb) {
-                    const newThumb = cardBody.querySelector('.job-thumb');
-                    if (newThumb) newThumb.replaceWith(existingThumb);
-                }
+                if (results.childElementCount) bodyChildren.push(results);
+                cardBody.replaceChildren(...bodyChildren);
 
                 // appendChild moves existing nodes to correct position, or inserts new ones
                 container.appendChild(card);
@@ -1753,12 +1816,6 @@
                 }
             });
             renderQueue();
-        }
-
-        function esc(str) {
-            const d = document.createElement('div');
-            d.textContent = str;
-            return d.innerHTML;
         }
 
         // ─── Model helpers ───
@@ -1874,7 +1931,9 @@
         function quitApp() {
             if (!confirm('Stop Video Masa and clean up files?')) return;
             fetch('/shutdown', { method: 'POST' }).catch(() => {});
-            document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#08080a;color:#606078;font-family:Outfit,sans-serif;font-size:18px;">Video Masa stopped. You can close this tab.</div>';
+            const stopped = makeEl('div', '', 'Video Masa stopped. You can close this tab.');
+            stopped.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100vh;background:#08080a;color:#606078;font-family:Outfit,sans-serif;font-size:18px;';
+            document.body.replaceChildren(stopped);
         }
 
         // ─── Heartbeat — tells server the browser tab is still open ───
@@ -1903,9 +1962,13 @@
             const banner = document.createElement('div');
             banner.id = 'healthBanner';
             banner.style.cssText = 'background:#2a1a00;border:1px solid #664400;border-radius:8px;padding:12px 16px;margin:0 0 16px;font-size:13px;line-height:1.6;color:#ffaa33;';
-            banner.innerHTML = '<strong style="color:#ffcc00;">⚠ Dependency issues detected</strong><br>'
-                + issues.map(i => '• ' + i).join('<br>')
-                + '<br><span style="color:#997733;font-size:12px;">Some features may not work. Reinstall the app or run setup again.</span>';
+            const heading = makeEl('strong', '', '⚠ Dependency issues detected');
+            heading.style.color = '#ffcc00';
+            banner.appendChild(heading);
+            issues.forEach(issue => banner.append(document.createElement('br'), document.createTextNode(`• ${issue}`)));
+            const advice = makeEl('span', '', 'Some features may not work. Reinstall the app or run setup again.');
+            advice.style.cssText = 'color:#997733;font-size:12px;';
+            banner.append(document.createElement('br'), advice);
             const main = document.querySelector('.main-card') || document.querySelector('.container') || document.body.firstElementChild;
             main.parentNode.insertBefore(banner, main);
         }).catch(() => {});

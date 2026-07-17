@@ -9,6 +9,7 @@ BUILD_DIR="$PROJECT_DIR/build/macos"
 DIST_DIR="$PROJECT_DIR/dist"
 APP_NAME="Video Masa"
 APP_BUNDLE="$BUILD_DIR/${APP_NAME}.app"
+APP_VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
 
 echo ""
 echo "Building ${APP_NAME}.app..."
@@ -22,6 +23,8 @@ mkdir -p "$DIST_DIR"
 
 # ─── Info.plist ───
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
 echo "  [+] Info.plist"
 
 # ─── App icon ───
@@ -45,15 +48,17 @@ echo "  [+] Stub executable"
 # ─── Launcher and setup scripts ───
 cp "$SCRIPT_DIR/launcher.sh" "$APP_BUNDLE/Contents/Resources/"
 cp "$SCRIPT_DIR/setup.sh" "$APP_BUNDLE/Contents/Resources/"
+cp "$PROJECT_DIR/VERSION" "$APP_BUNDLE/Contents/Resources/"
 chmod +x "$APP_BUNDLE/Contents/Resources/launcher.sh"
 chmod +x "$APP_BUNDLE/Contents/Resources/setup.sh"
-echo "  [+] launcher.sh + setup.sh"
+echo "  [+] launcher.sh + setup.sh + VERSION"
 
 # ─── Flask application ───
 cp "$PROJECT_DIR/app.py" "$APP_BUNDLE/Contents/Resources/app/"
 cp "$PROJECT_DIR/requirements.txt" "$APP_BUNDLE/Contents/Resources/app/"
+cp "$PROJECT_DIR/requirements.lock.txt" "$APP_BUNDLE/Contents/Resources/app/"
 cp "$PROJECT_DIR/templates/index.html" "$APP_BUNDLE/Contents/Resources/app/templates/"
-echo "  [+] Flask app (app.py, templates, requirements.txt)"
+echo "  [+] Flask app (source, templates, pinned + hash-locked requirements)"
 
 # ─── ffmpeg binary ───
 if [ -f "$SCRIPT_DIR/ffmpeg" ]; then
@@ -61,12 +66,7 @@ if [ -f "$SCRIPT_DIR/ffmpeg" ]; then
     chmod +x "$APP_BUNDLE/Contents/Resources/ffmpeg"
     echo "  [+] ffmpeg binary"
 else
-    echo "  [ ] ffmpeg binary — not found!"
-    echo "      Download a static macOS build from: https://evermeet.cx/ffmpeg/"
-    echo "      Place the 'ffmpeg' binary in packaging/macos/"
-    echo ""
-    echo "      The app will still work if ffmpeg is installed on the user's system"
-    echo "      (e.g. via 'brew install ffmpeg'), but bundling it is recommended."
+    echo "  [+] ffmpeg provided by pinned architecture-specific runtime package"
 fi
 
 echo ""
@@ -91,46 +91,16 @@ codesign --verify --verbose "$APP_BUNDLE" && echo "  [+] Signature verified" || 
 echo ""
 
 # ─── Prepare DMG staging ───
-DMG_NAME="VideoMasa-3.0.dmg"
+DMG_NAME="VideoMasa-${APP_VERSION}.dmg"
 DMG_STAGING="$BUILD_DIR/dmg_staging"
 rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING/.background"
 
 cp -R "$APP_BUNDLE" "$DMG_STAGING/"
 
-# Create Finder alias to /Applications (regular file, supports custom icons)
-osascript -e "
-tell application \"Finder\"
-    make new alias file at (POSIX file \"$DMG_STAGING\" as alias) to (POSIX file \"/Applications\" as alias)
-    set name of result to \"Applications\"
-end tell
-" 2>/dev/null && echo "  [+] Applications alias" || {
-    # Fallback to symlink if Finder alias creation fails
-    ln -s /Applications "$DMG_STAGING/Applications"
-    echo "  [+] Applications symlink (fallback)"
-}
-
-# Apply custom icon to Applications alias
-if [ -f "$SCRIPT_DIR/applications_icon.png" ]; then
-    ICON_TMP="$BUILD_DIR/app_icon_tmp"
-    mkdir -p "$ICON_TMP/icon.iconset"
-
-    for SIZE in 16 32 128 256 512; do
-        sips -z $SIZE $SIZE "$SCRIPT_DIR/applications_icon.png" \
-            --out "$ICON_TMP/icon.iconset/icon_${SIZE}x${SIZE}.png" > /dev/null 2>&1
-    done
-
-    iconutil -c icns "$ICON_TMP/icon.iconset" -o "$ICON_TMP/app_folder.icns" 2>/dev/null
-
-    osascript -e "
-        use framework \"AppKit\"
-        set iconImage to current application's NSImage's alloc()'s initWithContentsOfFile:\"$ICON_TMP/app_folder.icns\"
-        set iconOK to current application's NSWorkspace's sharedWorkspace()'s setIcon:iconImage forFile:\"$DMG_STAGING/Applications\" options:0
-        return iconOK as boolean
-    " 2>/dev/null | grep -q "true" && echo "  [+] Custom Applications icon" || echo "  [ ] Custom Applications icon skipped"
-
-    rm -rf "$ICON_TMP"
-fi
+# A standard symlink is deterministic and avoids blocking on Finder automation.
+ln -s /Applications "$DMG_STAGING/Applications"
+echo "  [+] Applications symlink"
 
 # Generate background image
 echo "Generating DMG background..."
@@ -169,7 +139,7 @@ echo "  Mounted at: $MOUNT_DIR"
 # Let Finder index the volume
 sleep 2
 
-osascript <<APPLESCRIPT
+osascript <<APPLESCRIPT &
 tell application "Finder"
     tell disk "$APP_NAME"
         open
@@ -191,6 +161,20 @@ tell application "Finder"
     end tell
 end tell
 APPLESCRIPT
+LAYOUT_PID=$!
+(
+    sleep 20
+    kill "$LAYOUT_PID" 2>/dev/null || true
+) &
+LAYOUT_WATCHDOG_PID=$!
+
+if wait "$LAYOUT_PID"; then
+    echo "  [+] Finder layout applied"
+else
+    echo "  [ ] Finder layout skipped (automation unavailable)"
+fi
+kill "$LAYOUT_WATCHDOG_PID" 2>/dev/null || true
+wait "$LAYOUT_WATCHDOG_PID" 2>/dev/null || true
 
 sync
 sleep 2
@@ -213,20 +197,27 @@ codesign --force --sign "$SIGN_ID" "$DIST_DIR/$DMG_NAME"
 echo "  [+] DMG signed"
 
 # ─── Notarize ───
-echo ""
-echo "Submitting for notarization (this may take a few minutes)..."
-xcrun notarytool submit "$DIST_DIR/$DMG_NAME" \
-    --keychain-profile "VideoMasa" \
-    --wait
+BUILD_STATUS="signed + notarized"
+if [ "${VIDEOMASA_SKIP_NOTARIZATION:-0}" = "1" ]; then
+    BUILD_STATUS="signed local verification build (not notarized)"
+    echo ""
+    echo "  [ ] Notarization skipped by VIDEOMASA_SKIP_NOTARIZATION=1"
+else
+    echo ""
+    echo "Submitting for notarization (this may take a few minutes)..."
+    xcrun notarytool submit "$DIST_DIR/$DMG_NAME" \
+        --keychain-profile "VideoMasa" \
+        --wait
 
-echo ""
-echo "Stapling notarization ticket..."
-xcrun stapler staple "$DIST_DIR/$DMG_NAME"
-echo "  [+] Notarization complete"
+    echo ""
+    echo "Stapling notarization ticket..."
+    xcrun stapler staple "$DIST_DIR/$DMG_NAME"
+    echo "  [+] Notarization complete"
+fi
 
 echo ""
 echo "════════════════════════════════════════════"
-echo "  Build complete! (signed + notarized)"
+echo "  Build complete! ($BUILD_STATUS)"
 echo "  DMG: dist/$DMG_NAME"
 echo "  App: build/macos/${APP_NAME}.app"
 echo "════════════════════════════════════════════"

@@ -18,7 +18,7 @@ Paste any video link (YouTube, TikTok, Instagram, X, etc.), transcribe it, downl
 ### Option A: Run from source
 
 #### 1. Prerequisites
-- **Python 3.8+**
+- **Python 3.10+**
 - **ffmpeg** — `brew install ffmpeg` (macOS) or [download](https://ffmpeg.org/download.html)
 
 #### 2. Install dependencies
@@ -32,7 +32,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Open **http://localhost:8080** in your browser.
+Open the authenticated local URL printed in the terminal.
 
 ### Option B: Desktop app
 
@@ -42,15 +42,15 @@ Pre-built packages are available for macOS and Windows. Download the latest rele
 
 **Windows**: Download the `.zip`, extract, and run `launcher.bat`.
 
-Both packages handle Python environment setup and dependency installation automatically on first launch.
+Both packages handle Python environment setup and dependency installation automatically on first launch. The desktop runtime includes a pinned, architecture-specific ffmpeg binary, so Homebrew is not required.
 
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-2.3.dmg
+# macOS — creates dist/VideoMasa-3.0.1.dmg
 bash packaging/macos/build_dmg.sh
 
-# Windows — creates dist/VideoMasa-2.3-Windows.zip
+# Windows — creates the versioned Windows zip
 bash packaging/windows/build_zip.sh
 ```
 
@@ -77,6 +77,14 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v3.0.1
+
+- **Self-healing macOS runtime** — detects broken Python environments and opens repair setup automatically
+- **Atomic setup** — verifies a versioned replacement runtime before switching to it and preserves the previous environment
+- **Reliable launch diagnostics** — waits for server readiness and offers repair, log, and diagnostic actions on failure
+- **Safer local API** — per-launch authentication, loopback origin checks, upload/job limits, and private cookie storage
+- **Security fixes** — blocks cookie path traversal and renders job data through DOM properties instead of HTML strings
 
 ## What's new in v2.3
 
