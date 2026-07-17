@@ -22,7 +22,7 @@ REQUIREMENTS_FILE="$APP_DIR/requirements.lock.txt"
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.0.3"
+    APP_VERSION="3.1.0"
 fi
 
 TEMP_VENV=""

@@ -5,6 +5,7 @@ Paste any video link (YouTube, TikTok, Instagram, X, etc.), transcribe it, downl
 ## Features
 
 - **Transcribe** videos with OpenAI Whisper (tiny, base, small, medium models)
+- **SRT caption export** — download millisecond-timed subtitles for CapCut and other editors
 - **Download** videos as MP4 or extract audio as MP3
 - **Quality selection** — choose video resolution (1080p, 720p, etc.) and audio bitrate independently
 - **Quality history** — re-downloading at a different quality creates a new job, preserving your original
@@ -47,12 +48,31 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-3.0.3.dmg
+# macOS — creates dist/VideoMasa-3.1.0.dmg
 bash packaging/macos/build_dmg.sh
 
 # Windows — creates the versioned Windows zip
 bash packaging/windows/build_zip.sh
 ```
+
+### Development validation
+
+Run the same source, test, syntax, packaging-contract, and version checks used by
+continuous integration:
+
+```bash
+scripts/validate_release.sh
+```
+
+For a signed and notarized macOS release candidate, pass the DMG to include the
+artifact integrity, Gatekeeper, stapling, bundle-signature, and version gates:
+
+```bash
+scripts/validate_release.sh dist/VideoMasa-3.1.0.dmg
+```
+
+The incremental backend modularization decision is documented in
+[`docs/architecture/ADR-001-incremental-modular-backend.md`](docs/architecture/ADR-001-incremental-modular-backend.md).
 
 ## How it works
 
@@ -77,6 +97,12 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v3.1.0
+
+- **CapCut-ready SRT export** — download UTF-8 subtitle files with millisecond Whisper segment timing from every completed transcript model
+- **Modular backend foundation** — separates configuration, runtime health, request security, and subtitle formatting into tested components
+- **Automated release validation** — adds macOS CI and repeatable source, packaging, signature, Gatekeeper, and notarization gates
 
 ## What's new in v3.0.3
 

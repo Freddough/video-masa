@@ -55,10 +55,13 @@ echo "  [+] launcher.sh + setup.sh + VERSION"
 
 # ─── Flask application ───
 cp "$PROJECT_DIR/app.py" "$APP_BUNDLE/Contents/Resources/app/"
+cp -R "$PROJECT_DIR/videomasa" "$APP_BUNDLE/Contents/Resources/app/"
+find "$APP_BUNDLE/Contents/Resources/app/videomasa" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$APP_BUNDLE/Contents/Resources/app/videomasa" -type f -name '*.pyc' -delete
 cp "$PROJECT_DIR/requirements.txt" "$APP_BUNDLE/Contents/Resources/app/"
 cp "$PROJECT_DIR/requirements.lock.txt" "$APP_BUNDLE/Contents/Resources/app/"
 cp "$PROJECT_DIR/templates/index.html" "$APP_BUNDLE/Contents/Resources/app/templates/"
-echo "  [+] Flask app (source, templates, pinned + hash-locked requirements)"
+echo "  [+] Flask app (entry point, backend package, templates, pinned + hash-locked requirements)"
 
 # ─── ffmpeg binary ───
 if [ -f "$SCRIPT_DIR/ffmpeg" ]; then

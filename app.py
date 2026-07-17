@@ -5,13 +5,10 @@ localhost:5000 — paste any video link, transcribe it, download it, or both.
 
 import os
 import re
-import sys
 import uuid
 import json
-import hmac
 import secrets
 import logging
-import platform
 import atexit
 import shutil
 import signal
@@ -20,36 +17,40 @@ import threading
 import mimetypes
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlsplit
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
+from videomasa.config import int_from_env, read_app_version
+from videomasa.runtime import check_health, find_ffmpeg, prepend_executable_directory
+from videomasa.security import (
+    constant_time_token_match,
+    cookie_path,
+    request_host_is_local,
+    request_origin_is_local,
+    validated_url,
+)
+from videomasa.subtitles import build_srt, parse_whisper_result
 
 os.umask(0o077)
 app = Flask(__name__)
 
 
 def _read_app_version():
-    for candidate in (
-        Path(__file__).resolve().parent / "VERSION",
-        Path(__file__).resolve().parent.parent / "VERSION",
-    ):
-        if candidate.is_file():
-            return candidate.read_text().strip()
-    return "3.0.3"
+    return read_app_version(__file__, "3.1.0")
 
 
 APP_VERSION = _read_app_version()
-APP_PORT = int(os.environ.get("VIDEOMASA_PORT", 8080))
+APP_PORT = int_from_env("VIDEOMASA_PORT", 8080)
 CONFIGURED_API_TOKEN = os.environ.get("VIDEOMASA_API_TOKEN")
 API_TOKEN = CONFIGURED_API_TOKEN or secrets.token_urlsafe(32)
 SESSION_COOKIE_NAME = "videomasa_session"
-MAX_UPLOAD_BYTES = int(os.environ.get("VIDEOMASA_MAX_UPLOAD_BYTES", 4 * 1024 * 1024 * 1024))
-MAX_COOKIE_BYTES = int(os.environ.get("VIDEOMASA_MAX_COOKIE_BYTES", 10 * 1024 * 1024))
-MAX_URL_LENGTH = int(os.environ.get("VIDEOMASA_MAX_URL_LENGTH", 4096))
-MAX_WORKERS = int(os.environ.get("VIDEOMASA_MAX_WORKERS", 2))
-MAX_PENDING_JOBS = int(os.environ.get("VIDEOMASA_MAX_PENDING_JOBS", 8))
-MAX_RETAINED_JOBS = int(os.environ.get("VIDEOMASA_MAX_RETAINED_JOBS", 100))
+MAX_UPLOAD_BYTES = int_from_env("VIDEOMASA_MAX_UPLOAD_BYTES", 4 * 1024 * 1024 * 1024)
+MAX_COOKIE_BYTES = int_from_env("VIDEOMASA_MAX_COOKIE_BYTES", 10 * 1024 * 1024)
+MAX_URL_LENGTH = int_from_env("VIDEOMASA_MAX_URL_LENGTH", 4096)
+MAX_WORKERS = int_from_env("VIDEOMASA_MAX_WORKERS", 2)
+MAX_PENDING_JOBS = int_from_env("VIDEOMASA_MAX_PENDING_JOBS", 8)
+MAX_RETAINED_JOBS = int_from_env("VIDEOMASA_MAX_RETAINED_JOBS", 100)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
@@ -67,98 +68,16 @@ class _RedactLaunchToken(logging.Filter):
 logging.getLogger("werkzeug").addFilter(_RedactLaunchToken())
 
 
-def _find_ffmpeg():
-    """Find ffmpeg: bundled in .app, pinned Python runtime, or system PATH."""
-    # Check relative to this script (for .app bundle: ../Resources/ffmpeg)
-    candidate = Path(__file__).resolve().parent.parent / "Resources" / "ffmpeg"
-    if candidate.exists():
-        return str(candidate)
-    # Desktop setup installs an architecture-specific binary with imageio-ffmpeg.
-    try:
-        import imageio_ffmpeg
-        candidate = Path(imageio_ffmpeg.get_ffmpeg_exe())
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    except (ImportError, RuntimeError):
-        pass
-    # Try resolving from PATH
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    # Check common Homebrew / system locations
-    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
-        if Path(p).exists():
-            return p
-    # Last resort — bare name (will fail at the call site with a clear error)
-    return "ffmpeg"
-
-
-FFMPEG_BIN = _find_ffmpeg()
-
-# Ensure ffmpeg's directory is on PATH so that whisper (and yt-dlp) can find it
-_ffmpeg_dir = str(Path(FFMPEG_BIN).parent)
-if _ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
-    os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+FFMPEG_BIN = find_ffmpeg(__file__)
+prepend_executable_directory(FFMPEG_BIN)
 
 # ─── Startup health checks ────────────────────────────────────
 # Run once at import time; results cached in _health for the /health endpoint.
 
-def _check_health():
-    """Verify all external dependencies are available. Returns dict of check results."""
-    checks = {}
-
-    # 1. ffmpeg
-    try:
-        r = subprocess.run([FFMPEG_BIN, "-version"], capture_output=True, text=True, timeout=5)
-        checks["ffmpeg"] = {"ok": r.returncode == 0, "path": FFMPEG_BIN,
-                            "detail": r.stdout.split("\n")[0] if r.returncode == 0 else r.stderr[:200]}
-    except FileNotFoundError:
-        checks["ffmpeg"] = {"ok": False, "path": FFMPEG_BIN, "detail": "Binary not found"}
-    except Exception as e:
-        checks["ffmpeg"] = {"ok": False, "path": FFMPEG_BIN, "detail": str(e)}
-
-    # 2. yt-dlp
-    ytdlp_bin = shutil.which("yt-dlp")
-    if ytdlp_bin:
-        try:
-            r = subprocess.run([ytdlp_bin, "--version"], capture_output=True, text=True, timeout=5)
-            checks["yt_dlp"] = {"ok": r.returncode == 0, "path": ytdlp_bin,
-                                "detail": r.stdout.strip() if r.returncode == 0 else r.stderr[:200]}
-        except Exception as e:
-            checks["yt_dlp"] = {"ok": False, "path": ytdlp_bin, "detail": str(e)}
-    else:
-        checks["yt_dlp"] = {"ok": False, "path": None, "detail": "Not found on PATH"}
-
-    # 3. whisper
-    whisper_bin = shutil.which("whisper")
-    if whisper_bin:
-        checks["whisper"] = {"ok": os.access(whisper_bin, os.X_OK), "path": whisper_bin,
-                             "detail": "CLI executable found"}
-    else:
-        checks["whisper"] = {"ok": False, "path": None, "detail": "Not found on PATH"}
-
-    # 4. whisper Python import (catches broken installs where CLI exists but import fails)
-    try:
-        r = subprocess.run([sys.executable, "-c", "import whisper; print(whisper.__file__)"],
-                           capture_output=True, text=True, timeout=10)
-        checks["whisper_import"] = {"ok": r.returncode == 0,
-                                    "detail": "OK" if r.returncode == 0 else r.stderr.strip()[:300]}
-    except Exception as e:
-        checks["whisper_import"] = {"ok": False, "detail": str(e)}
-
-    # 5. Python version
-    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    checks["python"] = {"ok": sys.version_info >= (3, 10), "version": py_ver,
-                         "architecture": platform.machine(), "path": sys.executable}
-
-    checks["all_ok"] = all(c.get("ok", False) for c in checks.values())
-    return checks
-
-
 if os.environ.get("VIDEOMASA_SKIP_HEALTH_CHECKS") == "1":
     _health = {"all_ok": True}
 else:
-    _health = _check_health()
+    _health = check_health(FFMPEG_BIN)
 
 # Print startup health summary
 _failed = [k for k, v in _health.items() if k != "all_ok" and not v.get("ok")]
@@ -201,34 +120,15 @@ atexit.register(_shutdown_executor)
 
 
 def _constant_time_token_match(candidate):
-    return bool(candidate) and hmac.compare_digest(str(candidate), API_TOKEN)
+    return constant_time_token_match(candidate, API_TOKEN)
 
 
 def _request_host_is_local():
-    try:
-        parsed = urlsplit(f"//{request.host}")
-        hostname = parsed.hostname
-        port = parsed.port
-    except ValueError:
-        return False
-    return hostname in {"127.0.0.1", "localhost", "::1"} and port in (None, APP_PORT)
+    return request_host_is_local(request.host, APP_PORT)
 
 
 def _request_origin_is_local():
-    origin = request.headers.get("Origin")
-    if not origin:
-        return True
-    try:
-        parsed = urlsplit(origin)
-        hostname = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    except ValueError:
-        return False
-    return (
-        parsed.scheme in {"http", "https"}
-        and hostname in {"127.0.0.1", "localhost", "::1"}
-        and port == APP_PORT
-    )
+    return request_origin_is_local(request.headers.get("Origin"), APP_PORT)
 
 
 @app.before_request
@@ -324,46 +224,33 @@ def _find_whisper_json(source_path, job_id):
     return None
 
 
+def _store_completed_transcript(job, model, whisper_data, make_primary=True):
+    """Store one model's public transcript and private subtitle timing track."""
+    transcript, timestamped, segments = parse_whisper_result(whisper_data)
+    job.setdefault("_subtitle_tracks", {})[model] = segments
+    job["transcripts"][model] = {
+        "transcript": transcript,
+        "timestamped": timestamped,
+        "status": "done",
+        "srt_ready": bool(segments),
+    }
+    if make_primary:
+        job["transcript"] = transcript
+        job["timestamped"] = timestamped
+    return transcript, timestamped
+
+
 def _is_twitter_url(url):
     """Check if a URL is from Twitter/X."""
     return bool(re.match(r'https?://(www\.)?(twitter\.com|x\.com)/', url))
 
 
-COOKIE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-
-
 def _cookie_path(name):
-    """Return a contained cookie path for a strict server-side cookie ID."""
-    if not isinstance(name, str):
-        return None
-    normalized = name.strip()
-    if normalized.lower().endswith(".txt"):
-        normalized = normalized[:-4]
-    if not COOKIE_NAME_RE.fullmatch(normalized):
-        return None
-    candidate = (COOKIES_DIR / f"{normalized}.txt").resolve()
-    try:
-        candidate.relative_to(COOKIES_DIR.resolve())
-    except ValueError:
-        return None
-    return candidate
+    return cookie_path(name, COOKIES_DIR)
 
 
 def _validated_url(value):
-    if not isinstance(value, str):
-        return None, "No URL provided"
-    url = value.strip()
-    if not url:
-        return None, "No URL provided"
-    if len(url) > MAX_URL_LENGTH:
-        return None, f"URL exceeds the {MAX_URL_LENGTH}-character limit"
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return None, "Invalid URL"
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return None, "Only http:// and https:// URLs are supported"
-    return url, ""
+    return validated_url(value, MAX_URL_LENGTH)
 
 
 def _cookie_args(cookies_browser="none"):
@@ -537,20 +424,9 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             if json_file:
                 with open(json_file) as jf:
                     data = json.load(jf)
-                job["transcript"] = data.get("text", "").strip()
-                segments = data.get("segments", [])
-                timestamped_lines = []
-                for seg in segments:
-                    start = seg.get("start", 0)
-                    end = seg.get("end", 0)
-                    text = seg.get("text", "").strip()
-                    sm, ss = divmod(int(start), 60)
-                    em, es = divmod(int(end), 60)
-                    timestamped_lines.append(f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]  {text}")
-                job["timestamped"] = "\n".join(timestamped_lines)
+                _store_completed_transcript(job, model_size, data)
                 # Clean up json
                 json_file.unlink(missing_ok=True)
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
             else:
                 stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
                 job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
@@ -643,19 +519,8 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
             if json_file:
                 with open(json_file) as jf:
                     data = json.load(jf)
-                job["transcript"] = data.get("text", "").strip()
-                segments = data.get("segments", [])
-                timestamped_lines = []
-                for seg in segments:
-                    start = seg.get("start", 0)
-                    end = seg.get("end", 0)
-                    text = seg.get("text", "").strip()
-                    sm, ss = divmod(int(start), 60)
-                    em, es = divmod(int(end), 60)
-                    timestamped_lines.append(f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]  {text}")
-                job["timestamped"] = "\n".join(timestamped_lines)
+                _store_completed_transcript(job, model_size, data)
                 json_file.unlink(missing_ok=True)
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
             else:
                 stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
                 job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
@@ -751,6 +616,7 @@ def process():
         "do_transcribe": do_transcribe,
         "do_download": do_download,
         "transcripts": {},
+        "_subtitle_tracks": {},
         "model": model_size,
         "available_formats": {"video": [], "audio": []},
         "downloaded_quality": "Best",
@@ -815,6 +681,7 @@ def upload():
         "do_transcribe": do_transcribe,
         "do_download": do_download,
         "transcripts": {},
+        "_subtitle_tracks": {},
         "model": model_size,
         "file_status": "absent",
     }
@@ -906,17 +773,8 @@ def merge_job(job_id):
                         if json_file:
                             with open(json_file) as jf:
                                 jdata = json.load(jf)
-                            job["transcript"] = jdata.get("text", "").strip()
-                            segments = jdata.get("segments", [])
-                            lines = []
-                            for seg in segments:
-                                s, e = seg.get("start", 0), seg.get("end", 0)
-                                sm, ss = divmod(int(s), 60)
-                                em, es = divmod(int(e), 60)
-                                lines.append(f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]  {seg.get('text', '').strip()}")
-                            job["timestamped"] = "\n".join(lines)
+                            _store_completed_transcript(job, merge_model, jdata)
                             json_file.unlink(missing_ok=True)
-                            job["transcripts"][merge_model] = {"transcript": job["transcript"], "timestamped": job["timestamped"], "status": "done"}
                         else:
                             stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
                             job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
@@ -979,6 +837,7 @@ def retranscribe(job_id):
     # Mark as transcribing
     if "transcripts" not in job:
         job["transcripts"] = {}
+    job.setdefault("_subtitle_tracks", {}).pop(model, None)
     job["transcripts"][model] = {"transcript": "", "timestamped": "", "status": "transcribing"}
 
     rt_model = model  # capture for closure
@@ -1003,17 +862,8 @@ def retranscribe(job_id):
             if json_file:
                 with open(json_file) as jf:
                     jdata = json.load(jf)
-                transcript = jdata.get("text", "").strip()
-                segments = jdata.get("segments", [])
-                lines = []
-                for seg in segments:
-                    s, e = seg.get("start", 0), seg.get("end", 0)
-                    sm, ss = divmod(int(s), 60)
-                    em, es = divmod(int(e), 60)
-                    lines.append(f"[{sm:02d}:{ss:02d} → {em:02d}:{es:02d}]  {seg.get('text', '').strip()}")
-                timestamped = "\n".join(lines)
+                _store_completed_transcript(job, rt_model, jdata, make_primary=False)
                 json_file.unlink(missing_ok=True)
-                job["transcripts"][rt_model] = {"transcript": transcript, "timestamped": timestamped, "status": "done"}
             else:
                 stderr_hint = (result.stderr or result.stdout or "")[:300]
                 job["transcripts"][rt_model] = {"transcript": f"Output not found. Whisper: {stderr_hint}" if stderr_hint else "Output not found.", "timestamped": "", "status": "error"}
@@ -1102,6 +952,40 @@ def download_file(job_id):
         return jsonify({"error": "File no longer exists on disk"}), 404
 
     return send_file(filepath, as_attachment=True, download_name=filename or Path(filepath).name)
+
+
+@app.route("/download-srt/<job_id>")
+def download_srt(job_id):
+    """Download one completed Whisper model as a CapCut-compatible SRT file."""
+    requested_model = request.args.get("model", "").strip().lower()
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+
+        model = requested_model or job.get("model", "base")
+        if model not in ("tiny", "base", "small", "medium"):
+            return jsonify({"error": "Invalid transcription model"}), 400
+
+        entry = job.get("transcripts", {}).get(model, {})
+        segments = list(job.get("_subtitle_tracks", {}).get(model, []))
+        title = job.get("title") or Path(job.get("filename") or "video-masa").stem
+
+    if entry.get("status") != "done" or not entry.get("srt_ready") or not segments:
+        return jsonify({"error": "SRT captions are not ready for this model"}), 409
+
+    srt_content = build_srt(segments)
+    if not srt_content:
+        return jsonify({"error": "No timed caption segments are available"}), 409
+
+    safe_title = secure_filename(title) or "video-masa"
+    payload = BytesIO(b"\xef\xbb\xbf" + srt_content.encode("utf-8"))
+    return send_file(
+        payload,
+        mimetype="application/x-subrip",
+        as_attachment=True,
+        download_name=f"{safe_title}-{model}.srt",
+    )
 
 
 @app.route("/download-mp3/<job_id>")
@@ -1193,6 +1077,7 @@ def redownload(job_id):
         "do_transcribe": False,
         "do_download": True,
         "transcripts": {},
+        "_subtitle_tracks": {},
         "model": "",
         "available_formats": source_job.get("available_formats", {"video": [], "audio": []}),
         "downloaded_quality": quality_label,

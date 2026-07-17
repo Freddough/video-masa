@@ -100,10 +100,53 @@ class StabilizationTests(unittest.TestCase):
                 "status": "done",
                 "message": "Complete",
                 "_file_path": "/private/source.mp4",
+                "_subtitle_tracks": {"base": [{"start": 0, "end": 1, "text": "Hidden"}]},
             }
         response = self.client.get("/status/abc", base_url=BASE_URL)
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("_file_path", response.get_json())
+        self.assertNotIn("_subtitle_tracks", response.get_json())
+
+    def test_srt_download_is_model_specific_utf8_and_media_independent(self) -> None:
+        self.bootstrap()
+        with videomasa.jobs_lock:
+            videomasa.jobs["captioned"] = {
+                "status": "done",
+                "title": "Final Cut Café",
+                "filename": "final.mp4",
+                "model": "base",
+                "transcripts": {
+                    "base": {
+                        "status": "done",
+                        "transcript": "Café caption",
+                        "timestamped": "",
+                        "srt_ready": True,
+                    },
+                },
+                "_subtitle_tracks": {
+                    "base": [{"start": 0.125, "end": 2.75, "text": "Café caption"}],
+                },
+                "_file_path": "/source/media/already-cleaned.mp4",
+            }
+
+        response = self.client.get(
+            "/download-srt/captioned?model=base",
+            base_url=BASE_URL,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/x-subrip")
+        self.assertIn("Final_Cut_Cafe-base.srt", response.headers["Content-Disposition"])
+        self.assertEqual(
+            response.data,
+            b"\xef\xbb\xbf1\r\n00:00:00,125 --> 00:00:02,750\r\nCaf\xc3\xa9 caption\r\n",
+        )
+
+        unavailable = self.client.get(
+            "/download-srt/captioned?model=small",
+            base_url=BASE_URL,
+        )
+        self.assertEqual(unavailable.status_code, 409)
 
     def test_process_rejects_non_http_urls_and_excess_pending_jobs(self) -> None:
         self.bootstrap()
@@ -134,6 +177,7 @@ class StabilizationTests(unittest.TestCase):
         self.assertNotIn("onclick=", template)
         self.assertIn("label.title = job.url || job.label", template)
         self.assertIn("copyButton.addEventListener", template)
+        self.assertIn("downloadSrt(job.id, activeModel)", template)
 
 
 if __name__ == "__main__":

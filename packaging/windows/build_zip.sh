@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build/windows/VideoMasa"
 DIST_DIR="$PROJECT_DIR/dist"
+APP_VERSION="$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")"
 
 echo ""
 echo "Building Video Masa for Windows..."
@@ -24,9 +25,14 @@ echo "  [+] launcher.bat + setup.bat"
 
 # ─── Copy Flask application ───
 cp "$PROJECT_DIR/app.py" "$BUILD_DIR/app/"
+cp -R "$PROJECT_DIR/videomasa" "$BUILD_DIR/app/"
+find "$BUILD_DIR/app/videomasa" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$BUILD_DIR/app/videomasa" -type f -name '*.pyc' -delete
+cp "$PROJECT_DIR/VERSION" "$BUILD_DIR/"
 cp "$PROJECT_DIR/requirements.txt" "$BUILD_DIR/app/"
+cp "$PROJECT_DIR/requirements.lock.txt" "$BUILD_DIR/app/"
 cp "$PROJECT_DIR/templates/index.html" "$BUILD_DIR/app/templates/"
-echo "  [+] Flask app"
+echo "  [+] Flask app + backend package"
 
 # ─── Copy icon ───
 if [ -f "$SCRIPT_DIR/icon.ico" ]; then
@@ -45,7 +51,7 @@ fi
 echo ""
 
 # ─── Create ZIP ───
-ZIP_NAME="VideoMasa-3.0-Windows.zip"
+ZIP_NAME="VideoMasa-${APP_VERSION}-Windows.zip"
 rm -f "$DIST_DIR/$ZIP_NAME"
 cd "$PROJECT_DIR/build/windows"
 zip -r "$DIST_DIR/$ZIP_NAME" "VideoMasa" -x "*.DS_Store"

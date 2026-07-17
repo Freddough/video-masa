@@ -1633,7 +1633,15 @@
                 const copy = makeEl('button', 'copy-btn', 'Copy');
                 copy.type = 'button';
                 copy.addEventListener('click', () => copyText(`${job.id}_${activeModel}`, copy));
-                actions.append(toggle, copy, makeModelDropdown(job, idx, activeModel));
+                actions.append(toggle, copy);
+                if (activeEntry.srt_ready) {
+                    const srt = makeEl('button', 'dl-btn', '↓ SRT');
+                    srt.type = 'button';
+                    srt.title = 'Download timed captions for CapCut';
+                    srt.addEventListener('click', () => downloadSrt(job.id, activeModel));
+                    actions.appendChild(srt);
+                }
+                actions.appendChild(makeModelDropdown(job, idx, activeModel));
                 block.appendChild(actions);
 
                 const body = makeEl('div', `result-body${isTimestamped ? ' mono' : ''}`);
@@ -1804,6 +1812,15 @@
                 btn.style.borderColor = 'var(--lime)';
                 setTimeout(() => { btn.textContent = prev; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
             });
+        }
+
+        function downloadSrt(jobId, model) {
+            const link = document.createElement('a');
+            link.href = `/download-srt/${encodeURIComponent(jobId)}?model=${encodeURIComponent(model)}`;
+            link.download = '';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
         }
 
         function clearDone() {

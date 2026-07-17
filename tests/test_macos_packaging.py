@@ -65,14 +65,23 @@ class MacOSPackagingTests(unittest.TestCase):
         python_path = self.state / "venv" / "bin" / "python"
         write_executable(python_path, python_body)
         self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / "version").write_text("3.0.3\n")
+        (self.state / "version").write_text("3.1.0\n")
         return python_path
+
+    def test_desktop_builds_include_backend_package_and_version_manifest(self) -> None:
+        mac_build = (MACOS_DIR / "build_dmg.sh").read_text()
+        windows_build = (PROJECT_ROOT / "packaging" / "windows" / "build_zip.sh").read_text()
+
+        self.assertIn('cp -R "$PROJECT_DIR/videomasa"', mac_build)
+        self.assertIn('cp -R "$PROJECT_DIR/videomasa"', windows_build)
+        self.assertIn('cp "$PROJECT_DIR/VERSION" "$BUILD_DIR/"', windows_build)
+        self.assertIn('VideoMasa-${APP_VERSION}-Windows.zip', windows_build)
 
     def test_launcher_detects_broken_python_symlink_and_safely_opens_setup(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
         broken_python.parent.mkdir(parents=True)
         broken_python.symlink_to("/missing/homebrew/python3.13")
-        (self.state / "version").write_text("3.0.3\n")
+        (self.state / "version").write_text("3.1.0\n")
 
         osascript_log = self.root / "osascript-args.txt"
         fake_osascript = self.root / "fake-osascript"
@@ -112,7 +121,7 @@ class MacOSPackagingTests(unittest.TestCase):
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(b'{"all_ok":true,"app_version":"3.0.3"}')
+                            self.wfile.write(b'{"all_ok":true,"app_version":"3.1.0"}')
                         else:
                             self.send_response(404)
                             self.end_headers()
@@ -308,7 +317,7 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertTrue((self.state / "venv").is_symlink())
         self.assertTrue((self.state / "venv" / "bin" / "python").exists())
         self.assertTrue((self.state / "venv" / "bin" / "ffmpeg").is_symlink())
-        self.assertEqual((self.state / "version").read_text(), "3.0.3\n")
+        self.assertEqual((self.state / "version").read_text(), "3.1.0\n")
         backups = list(self.state.glob("venv.broken-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "bin" / "python").is_symlink())
@@ -337,7 +346,7 @@ class MacOSPackagingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((app_dir / "__pycache__").exists())
-        self.assertEqual((self.state / "version").read_text(), "3.0.3\n")
+        self.assertEqual((self.state / "version").read_text(), "3.1.0\n")
 
 
 if __name__ == "__main__":
