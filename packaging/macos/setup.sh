@@ -16,7 +16,7 @@ REQUIREMENTS_FILE="$APP_DIR/requirements.lock.txt"
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.0.1"
+    APP_VERSION="3.0.2"
 fi
 
 TEMP_VENV=""
@@ -178,7 +178,13 @@ echo "       Done."
 echo ""
 
 echo "[4/4] Verifying the complete installation..."
-"$TEMP_PYTHON" -m py_compile "$APP_DIR/app.py"
+"$TEMP_PYTHON" - "$APP_DIR/app.py" <<'PY'
+from pathlib import Path
+import sys
+
+source_path = Path(sys.argv[1])
+compile(source_path.read_bytes(), str(source_path), "exec")
+PY
 "$TEMP_PYTHON" -m pip check
 "$TEMP_PYTHON" - <<'PY'
 from importlib.metadata import version

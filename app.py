@@ -35,7 +35,7 @@ def _read_app_version():
     ):
         if candidate.is_file():
             return candidate.read_text().strip()
-    return "3.0.1"
+    return "3.0.2"
 
 
 APP_VERSION = _read_app_version()

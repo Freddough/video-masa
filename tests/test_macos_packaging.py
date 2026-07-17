@@ -65,14 +65,14 @@ class MacOSPackagingTests(unittest.TestCase):
         python_path = self.state / "venv" / "bin" / "python"
         write_executable(python_path, python_body)
         self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / "version").write_text("3.0.1\n")
+        (self.state / "version").write_text("3.0.2\n")
         return python_path
 
     def test_launcher_detects_broken_python_symlink_and_safely_opens_setup(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
         broken_python.parent.mkdir(parents=True)
         broken_python.symlink_to("/missing/homebrew/python3.13")
-        (self.state / "version").write_text("3.0.1\n")
+        (self.state / "version").write_text("3.0.2\n")
 
         osascript_log = self.root / "osascript-args.txt"
         fake_osascript = self.root / "fake-osascript"
@@ -112,7 +112,7 @@ class MacOSPackagingTests(unittest.TestCase):
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(b'{"all_ok":true,"app_version":"3.0.1"}')
+                            self.wfile.write(b'{"all_ok":true,"app_version":"3.0.2"}')
                         else:
                             self.send_response(404)
                             self.end_headers()
@@ -215,6 +215,9 @@ class MacOSPackagingTests(unittest.TestCase):
                 echo "2026.7.4"
                 exit 0
             fi
+            if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "py_compile" ]; then
+                exec {sys.executable!r} "$@"
+            fi
             if [ "${{1:-}}" = "-" ]; then
                 cat >/dev/null
                 echo "  ✓ imports"
@@ -280,12 +283,36 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertTrue((self.state / "venv").is_symlink())
         self.assertTrue((self.state / "venv" / "bin" / "python").exists())
         self.assertTrue((self.state / "venv" / "bin" / "ffmpeg").is_symlink())
-        self.assertEqual((self.state / "version").read_text(), "3.0.1\n")
+        self.assertEqual((self.state / "version").read_text(), "3.0.2\n")
         backups = list(self.state.glob("venv.broken-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "bin" / "python").is_symlink())
         self.assertEqual(len(list(self.state.glob("venv.runtime-*"))), 1)
         self.assertFalse((self.state / "setup.lock").exists())
+
+    def test_setup_verifies_source_without_writing_to_protected_app_bundle(self) -> None:
+        app_dir = self.resources / "app"
+        app_path = app_dir / "app.py"
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+
+        app_path.chmod(0o444)
+        app_dir.chmod(0o555)
+        try:
+            result = self.run_script(
+                "setup.sh",
+                VIDEOMASA_PYTHON=str(self.make_fake_base_python(fail_pip=False)),
+                VIDEOMASA_SKIP_MODEL_DOWNLOAD="1",
+                VIDEOMASA_FFMPEG=str(fake_bin / "ffmpeg"),
+                PATH=f"{fake_bin}:{os.environ['PATH']}",
+            )
+        finally:
+            app_dir.chmod(0o755)
+            app_path.chmod(0o644)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((app_dir / "__pycache__").exists())
+        self.assertEqual((self.state / "version").read_text(), "3.0.2\n")
 
 
 if __name__ == "__main__":
