@@ -65,14 +65,14 @@ class MacOSPackagingTests(unittest.TestCase):
         python_path = self.state / "venv" / "bin" / "python"
         write_executable(python_path, python_body)
         self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / "version").write_text("3.0.2\n")
+        (self.state / "version").write_text("3.0.3\n")
         return python_path
 
     def test_launcher_detects_broken_python_symlink_and_safely_opens_setup(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
         broken_python.parent.mkdir(parents=True)
         broken_python.symlink_to("/missing/homebrew/python3.13")
-        (self.state / "version").write_text("3.0.2\n")
+        (self.state / "version").write_text("3.0.3\n")
 
         osascript_log = self.root / "osascript-args.txt"
         fake_osascript = self.root / "fake-osascript"
@@ -112,7 +112,7 @@ class MacOSPackagingTests(unittest.TestCase):
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(b'{"all_ok":true,"app_version":"3.0.2"}')
+                            self.wfile.write(b'{"all_ok":true,"app_version":"3.0.3"}')
                         else:
                             self.send_response(404)
                             self.end_headers()
@@ -201,6 +201,31 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertEqual(copied.read_text(), diagnostics)
         self.assertFalse((self.state / "server.pid").exists())
 
+    def test_launcher_and_setup_reexecute_native_arm64_when_translated(self) -> None:
+        fake_sysctl = self.root / "fake-sysctl"
+        write_executable(fake_sysctl, "#!/bin/bash\necho 1\n")
+
+        for script_name in ("launcher.sh", "setup.sh"):
+            with self.subTest(script=script_name):
+                arch_log = self.root / f"{script_name}.arch-args"
+                fake_arch = self.root / f"{script_name}.fake-arch"
+                write_executable(
+                    fake_arch,
+                    f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {str(arch_log)!r}\n",
+                )
+
+                result = self.run_script(
+                    script_name,
+                    VIDEOMASA_SYSCTL_BIN=str(fake_sysctl),
+                    VIDEOMASA_ARCH_BIN=str(fake_arch),
+                )
+
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    arch_log.read_text().splitlines(),
+                    ["-arm64", "/bin/bash", str(self.resources / script_name)],
+                )
+
     def make_fake_base_python(self, fail_pip: bool) -> Path:
         fake_python = self.root / "fake-python"
         generated_python = self.root / "generated-venv-python"
@@ -283,7 +308,7 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertTrue((self.state / "venv").is_symlink())
         self.assertTrue((self.state / "venv" / "bin" / "python").exists())
         self.assertTrue((self.state / "venv" / "bin" / "ffmpeg").is_symlink())
-        self.assertEqual((self.state / "version").read_text(), "3.0.2\n")
+        self.assertEqual((self.state / "version").read_text(), "3.0.3\n")
         backups = list(self.state.glob("venv.broken-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "bin" / "python").is_symlink())
@@ -312,7 +337,7 @@ class MacOSPackagingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((app_dir / "__pycache__").exists())
-        self.assertEqual((self.state / "version").read_text(), "3.0.2\n")
+        self.assertEqual((self.state / "version").read_text(), "3.0.3\n")
 
 
 if __name__ == "__main__":

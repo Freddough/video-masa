@@ -11,6 +11,7 @@ import json
 import hmac
 import secrets
 import logging
+import platform
 import atexit
 import shutil
 import signal
@@ -35,7 +36,7 @@ def _read_app_version():
     ):
         if candidate.is_file():
             return candidate.read_text().strip()
-    return "3.0.2"
+    return "3.0.3"
 
 
 APP_VERSION = _read_app_version()
@@ -148,7 +149,7 @@ def _check_health():
     # 5. Python version
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     checks["python"] = {"ok": sys.version_info >= (3, 10), "version": py_ver,
-                         "path": sys.executable}
+                         "architecture": platform.machine(), "path": sys.executable}
 
     checks["all_ok"] = all(c.get("ok", False) for c in checks.values())
     return checks

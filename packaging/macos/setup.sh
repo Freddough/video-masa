@@ -5,6 +5,12 @@
 set -Eeuo pipefail
 umask 077
 
+SYSCTL_BIN="${VIDEOMASA_SYSCTL_BIN:-/usr/sbin/sysctl}"
+ARCH_BIN="${VIDEOMASA_ARCH_BIN:-/usr/bin/arch}"
+if [ "$("$SYSCTL_BIN" -in sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
+    exec "$ARCH_BIN" -arm64 /bin/bash "$0" "$@"
+fi
+
 RESOURCES_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$RESOURCES_DIR/app"
 VM_HOME="${VIDEOMASA_HOME:-$HOME/.videomasa}"
@@ -16,7 +22,7 @@ REQUIREMENTS_FILE="$APP_DIR/requirements.lock.txt"
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.0.2"
+    APP_VERSION="3.0.3"
 fi
 
 TEMP_VENV=""

@@ -47,7 +47,7 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-3.0.2.dmg
+# macOS — creates dist/VideoMasa-3.0.3.dmg
 bash packaging/macos/build_dmg.sh
 
 # Windows — creates the versioned Windows zip
@@ -77,6 +77,11 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+## What's new in v3.0.3
+
+- **Native Apple Silicon launch** — detects Rosetta-translated startup and re-executes the launcher and setup under ARM64 so Python matches architecture-specific dependencies
+- **Architecture diagnostics** — health and launch reports now identify the active Python architecture
 
 ## What's new in v3.0.2
 

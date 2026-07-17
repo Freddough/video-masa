@@ -5,6 +5,12 @@
 set -u
 umask 077
 
+SYSCTL_BIN="${VIDEOMASA_SYSCTL_BIN:-/usr/sbin/sysctl}"
+ARCH_BIN="${VIDEOMASA_ARCH_BIN:-/usr/bin/arch}"
+if [ "$("$SYSCTL_BIN" -in sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
+    exec "$ARCH_BIN" -arm64 /bin/bash "$0" "$@"
+fi
+
 RESOURCES_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_DIR="$RESOURCES_DIR/app"
 VM_HOME="${VIDEOMASA_HOME:-$HOME/.videomasa}"
@@ -29,7 +35,7 @@ API_TOKEN=""
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.0.2"
+    APP_VERSION="3.0.3"
 fi
 
 mkdir -p "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR"
@@ -95,9 +101,11 @@ write_diagnostics() {
         echo "App directory: $APP_DIR"
         echo "State directory: $VM_HOME"
         echo "Port: $PORT"
+        echo "Launcher architecture: $(/usr/bin/arch 2>/dev/null || /usr/bin/uname -m)"
         echo "Venv Python: $VENV_PYTHON"
         if [ -x "$VENV_PYTHON" ]; then
             echo "Python version: $("$VENV_PYTHON" --version 2>&1 || true)"
+            echo "Python architecture: $("$VENV_PYTHON" -c 'import platform; print(platform.machine())' 2>&1 || true)"
         else
             echo "Python status: missing or not executable"
         fi
