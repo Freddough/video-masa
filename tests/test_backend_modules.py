@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from videomasa.config import int_from_env, read_app_version
 from videomasa.runtime import check_health
+from videomasa.job_state import format_duration, has_active_jobs
 from videomasa.security import (
     constant_time_token_match,
     cookie_path,
@@ -15,6 +16,7 @@ from videomasa.security import (
     validated_url,
 )
 from videomasa.subtitles import build_srt, format_srt_timestamp, parse_whisper_result
+from videomasa.transcription import TranscriptionTimeout, transcribe_with_whisper
 
 
 class ConfigTests(unittest.TestCase):
@@ -107,6 +109,37 @@ class SubtitleTests(unittest.TestCase):
             "1\r\n00:00:01,235 --> 00:00:03,500\r\nHello world.\r\n\r\n"
             "2\r\n00:00:03,500 --> 00:00:05,025\r\nSecond\r\nline.\r\n",
         )
+
+
+class JobStateTests(unittest.TestCase):
+    def test_active_jobs_include_model_only_retranscriptions(self) -> None:
+        self.assertFalse(has_active_jobs([{"status": "done", "transcripts": {}}]))
+        self.assertTrue(has_active_jobs([{"status": "queued", "transcripts": {}}]))
+        self.assertTrue(has_active_jobs([{
+            "status": "done",
+            "transcripts": {"medium": {"status": "transcribing"}},
+        }]))
+
+    def test_duration_formatting_is_readable_for_timeout_messages(self) -> None:
+        self.assertEqual(format_duration(42), "42 seconds")
+        self.assertEqual(format_duration(600), "10 minutes")
+        self.assertEqual(format_duration(14_400), "4 hours")
+        self.assertEqual(format_duration(3_661), "1h 1m")
+
+
+class TranscriptionExecutionTests(unittest.TestCase):
+    def test_timeout_reports_configured_limit_and_measured_elapsed_time(self) -> None:
+        timeout = subprocess.TimeoutExpired(["whisper"], 25)
+        with (
+            patch("videomasa.transcription.subprocess.run", side_effect=timeout),
+            patch("videomasa.transcription.time.monotonic", side_effect=[100.0, 125.5]),
+        ):
+            with self.assertRaises(TranscriptionTimeout) as caught:
+                transcribe_with_whisper("podcast.mp4", "base", "/tmp", 25)
+
+        self.assertEqual(caught.exception.timeout_seconds, 25)
+        self.assertEqual(caught.exception.elapsed_seconds, 25.5)
+        self.assertEqual(caught.exception.command[0], "whisper")
 
 
 if __name__ == "__main__":

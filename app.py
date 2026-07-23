@@ -16,6 +16,7 @@ import subprocess
 import threading
 import mimetypes
 import webbrowser
+import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -23,6 +24,7 @@ from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from videomasa.config import int_from_env, read_app_version
 from videomasa.runtime import check_health, find_ffmpeg, prepend_executable_directory
+from videomasa.job_state import format_duration, has_active_jobs
 from videomasa.security import (
     constant_time_token_match,
     cookie_path,
@@ -31,13 +33,14 @@ from videomasa.security import (
     validated_url,
 )
 from videomasa.subtitles import build_srt, parse_whisper_result
+from videomasa.transcription import TranscriptionTimeout, transcribe_with_whisper
 
 os.umask(0o077)
 app = Flask(__name__)
 
 
 def _read_app_version():
-    return read_app_version(__file__, "3.1.0")
+    return read_app_version(__file__, "3.1.1")
 
 
 APP_VERSION = _read_app_version()
@@ -51,6 +54,8 @@ MAX_URL_LENGTH = int_from_env("VIDEOMASA_MAX_URL_LENGTH", 4096)
 MAX_WORKERS = int_from_env("VIDEOMASA_MAX_WORKERS", 2)
 MAX_PENDING_JOBS = int_from_env("VIDEOMASA_MAX_PENDING_JOBS", 8)
 MAX_RETAINED_JOBS = int_from_env("VIDEOMASA_MAX_RETAINED_JOBS", 100)
+DOWNLOAD_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS", 1800))
+TRANSCRIPTION_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS", 14_400))
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
@@ -159,7 +164,11 @@ def _prune_terminal_jobs_locked():
     if len(jobs) < MAX_RETAINED_JOBS:
         return
     for job_id, job in list(jobs.items()):
-        if job.get("status") in {"done", "error"}:
+        if (
+            job.get("status") in {"done", "error"}
+            and not has_active_jobs([job])
+            and not job.get("retryable")
+        ):
             jobs.pop(job_id, None)
         if len(jobs) < MAX_RETAINED_JOBS:
             break
@@ -195,7 +204,6 @@ def _submit_job(function, *args):
     return True
 
 # Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 5 min
-import time
 _last_heartbeat = time.time()
 _HEARTBEAT_TIMEOUT = 300  # seconds (5 minutes)
 
@@ -238,6 +246,172 @@ def _store_completed_transcript(job, model, whisper_data, make_primary=True):
         job["transcript"] = transcript
         job["timestamped"] = timestamped
     return transcript, timestamped
+
+
+def _clear_job_failure(job):
+    for key in ("failure_stage", "failure_code", "elapsed_seconds", "timeout_seconds", "stage_started_at"):
+        job.pop(key, None)
+    job["retryable"] = False
+
+
+def _begin_transcription(job, model, affect_job_status=True):
+    job.setdefault("transcripts", {})[model] = {
+        "transcript": "",
+        "timestamped": "",
+        "status": "transcribing",
+    }
+    job.setdefault("_subtitle_tracks", {}).pop(model, None)
+    if affect_job_status:
+        _clear_job_failure(job)
+        job["status"] = "transcribing"
+        job["stage"] = "transcription"
+        job["stage_started_at"] = int(time.time())
+        job["timeout_seconds"] = TRANSCRIPTION_TIMEOUT_SECONDS
+        job["message"] = (
+            "Transcribing audio... Long recordings may take time "
+            f"(limit: {format_duration(TRANSCRIPTION_TIMEOUT_SECONDS)})."
+        )
+
+
+def _record_transcription_failure(
+    job,
+    model,
+    message,
+    code,
+    elapsed_seconds,
+    affect_job_status=True,
+):
+    elapsed = max(0, int(round(elapsed_seconds)))
+    job.setdefault("transcripts", {})[model] = {
+        "transcript": "",
+        "timestamped": "",
+        "status": "error",
+        "error_code": code,
+        "message": message,
+        "elapsed_seconds": elapsed,
+    }
+    if affect_job_status:
+        job["status"] = "error"
+        job["stage"] = "error"
+        job["message"] = message
+        job["failure_stage"] = "transcription"
+        job["failure_code"] = code
+        job["elapsed_seconds"] = elapsed
+        job["timeout_seconds"] = TRANSCRIPTION_TIMEOUT_SECONDS
+        job["retryable"] = bool(job.get("_file_path") and Path(job["_file_path"]).exists())
+
+
+def _cleanup_whisper_outputs(source_path):
+    source = Path(source_path)
+    candidates = [source.with_suffix(ext) for ext in (".json", ".srt", ".vtt", ".txt", ".tsv")]
+    candidates.append(source.parent / f"{source.name}.json")
+    for candidate in candidates:
+        if candidate != source:
+            candidate.unlink(missing_ok=True)
+
+
+def _transcribe_existing_file(job_id, source_path, model, make_primary=True, affect_job_status=True):
+    """Transcribe retained media with consistent timeout, logging, and state."""
+    job = jobs[job_id]
+    source = Path(source_path)
+    _cleanup_whisper_outputs(source)
+    _begin_transcription(job, model, affect_job_status=affect_job_status)
+
+    try:
+        result, elapsed = transcribe_with_whisper(
+            source,
+            model,
+            WORK_DIR,
+            TRANSCRIPTION_TIMEOUT_SECONDS,
+        )
+    except TranscriptionTimeout as error:
+        elapsed_text = format_duration(error.elapsed_seconds)
+        limit_text = format_duration(error.timeout_seconds)
+        message = (
+            f"Transcription timed out after {elapsed_text} (limit: {limit_text}). "
+            "The source was retained — choose Retry to try again."
+        )
+        _record_transcription_failure(
+            job,
+            model,
+            message,
+            "timeout",
+            error.elapsed_seconds,
+            affect_job_status=affect_job_status,
+        )
+        _cleanup_whisper_outputs(source)
+        print(
+            f"[transcription timeout] job={job_id} model={model} "
+            f"elapsed={error.elapsed_seconds:.1f}s limit={error.timeout_seconds}s",
+            flush=True,
+        )
+        return False
+    except Exception as error:
+        message = f"Transcription could not start: {str(error)}"
+        _record_transcription_failure(
+            job,
+            model,
+            message,
+            "exception",
+            0,
+            affect_job_status=affect_job_status,
+        )
+        _cleanup_whisper_outputs(source)
+        print(f"[transcription exception] job={job_id} model={model}: {error}", flush=True)
+        return False
+
+    if result.returncode != 0:
+        full_error = result.stderr or result.stdout or "unknown error"
+        message = f"Transcription failed after {format_duration(elapsed)}: {full_error[:400]}"
+        _record_transcription_failure(
+            job,
+            model,
+            message,
+            "process_error",
+            elapsed,
+            affect_job_status=affect_job_status,
+        )
+        _cleanup_whisper_outputs(source)
+        print(f"[whisper error] job={job_id} rc={result.returncode}\n{full_error}", flush=True)
+        return False
+
+    json_file = _find_whisper_json(source, job_id)
+    if not json_file:
+        hint = (result.stderr or result.stdout or "")[:300]
+        message = f"Transcription output not found. Whisper output: {hint}" if hint else "Transcription output not found."
+        _record_transcription_failure(
+            job,
+            model,
+            message,
+            "output_missing",
+            elapsed,
+            affect_job_status=affect_job_status,
+        )
+        _cleanup_whisper_outputs(source)
+        return False
+
+    try:
+        with open(json_file) as input_file:
+            whisper_data = json.load(input_file)
+    except (OSError, ValueError) as error:
+        message = f"Transcription output could not be read: {str(error)}"
+        _record_transcription_failure(
+            job,
+            model,
+            message,
+            "output_invalid",
+            elapsed,
+            affect_job_status=affect_job_status,
+        )
+        _cleanup_whisper_outputs(source)
+        return False
+    _store_completed_transcript(job, model, whisper_data, make_primary=make_primary)
+    _cleanup_whisper_outputs(source)
+    if affect_job_status:
+        _clear_job_failure(job)
+        job["stage"] = "finalizing"
+        job["elapsed_seconds"] = max(0, int(round(elapsed)))
+    return True
 
 
 def _is_twitter_url(url):
@@ -322,6 +496,9 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         probe_thread.start()
 
         job["status"] = "downloading"
+        job["stage"] = "download"
+        job["stage_started_at"] = int(time.time())
+        job["timeout_seconds"] = DOWNLOAD_TIMEOUT_SECONDS
         job["message"] = "Downloading video..."
 
         # Download with yt-dlp — always best quality
@@ -340,7 +517,36 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             cmd.extend(["--extractor-retries", "5"])
 
         cmd.extend(["--", url])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        download_started = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = max(0, int(round(time.monotonic() - download_started)))
+            job.update({
+                "status": "error",
+                "stage": "error",
+                "message": (
+                    f"Download timed out after {format_duration(elapsed)} "
+                    f"(limit: {format_duration(DOWNLOAD_TIMEOUT_SECONDS)})."
+                ),
+                "failure_stage": "download",
+                "failure_code": "timeout",
+                "elapsed_seconds": elapsed,
+                "timeout_seconds": DOWNLOAD_TIMEOUT_SECONDS,
+                "retryable": False,
+            })
+            print(
+                f"[download timeout] job={job_id} elapsed={elapsed}s "
+                f"limit={DOWNLOAD_TIMEOUT_SECONDS}s",
+                flush=True,
+            )
+            check_queue_and_cleanup()
+            return
 
         # Collect probe results (wait up to 5s if still running)
         probe_thread.join(timeout=5)
@@ -353,6 +559,10 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
 
         if result.returncode != 0:
             job["status"] = "error"
+            job["stage"] = "error"
+            job["failure_stage"] = "download"
+            job["failure_code"] = "process_error"
+            job["retryable"] = False
             stderr = result.stderr
             if _is_twitter_url(url):
                 if "No video could be found" in stderr or "Requested format is not available" in stderr:
@@ -363,6 +573,7 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
                     job["message"] = f"Twitter download failed: {stderr[:200]}"
             else:
                 job["message"] = f"Download failed: {stderr[:200]}"
+            check_queue_and_cleanup()
             return
 
         # Find the downloaded file
@@ -397,55 +608,23 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
 
         # If transcribe requested, run whisper (read from dict so merges take effect)
         if job["do_transcribe"]:
-            job["status"] = "transcribing"
-            job["message"] = "Transcribing audio..."
-            job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "transcribing"}
-
-            whisper_cmd = [
-                "whisper",
-                str(downloaded),
-                "--model", model_size,
-                "--output_format", "json",
-                "--output_dir", str(WORK_DIR),
-            ]
-            wresult = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
-
-            if wresult.returncode != 0:
-                full_err = (wresult.stderr or wresult.stdout or "unknown error")
-                print(f"[whisper error] job={job_id} rc={wresult.returncode}\n{full_err}", flush=True)
-                job["status"] = "error"
-                job["message"] = f"Transcription failed: {full_err[:500]}"
-                job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "error"}
+            if not _transcribe_existing_file(job_id, downloaded, model_size):
+                check_queue_and_cleanup()
                 return
 
-            # Parse whisper JSON output
-            json_file = _find_whisper_json(downloaded, job_id)
-
-            if json_file:
-                with open(json_file) as jf:
-                    data = json.load(jf)
-                _store_completed_transcript(job, model_size, data)
-                # Clean up json
-                json_file.unlink(missing_ok=True)
-            else:
-                stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
-                job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
-                job["timestamped"] = ""
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
-
-        # Clean up other whisper output files
-        for ext in ['.srt', '.vtt', '.txt', '.tsv']:
-            cleanup = downloaded.with_suffix(ext)
-            if cleanup.exists():
-                cleanup.unlink(missing_ok=True)
-
+        _clear_job_failure(job)
         job["status"] = "done"
+        job["stage"] = "done"
         job["message"] = "Complete"
         check_queue_and_cleanup()
 
     except subprocess.TimeoutExpired:
+        failed_stage = job.get("stage", "process")
         job["status"] = "error"
-        job["message"] = "Process timed out."
+        job["stage"] = "error"
+        job["failure_stage"] = failed_stage
+        job["failure_code"] = "timeout"
+        job["message"] = "An unexpected processing stage timed out. See the server log for details."
         check_queue_and_cleanup()
     except Exception as e:
         job["status"] = "error"
@@ -493,52 +672,21 @@ def run_file_job(job_id: str, file_path: Path, model_size: str, do_transcribe: b
             job["download_path"] = str(file_path)
 
         if do_transcribe:
-            job["status"] = "transcribing"
-            job["message"] = "Transcribing audio..."
-            job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "transcribing"}
-
-            whisper_cmd = [
-                "whisper",
-                str(file_path),
-                "--model", model_size,
-                "--output_format", "json",
-                "--output_dir", str(WORK_DIR),
-            ]
-            wresult = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
-
-            if wresult.returncode != 0:
-                full_err = (wresult.stderr or wresult.stdout or "unknown error")
-                print(f"[whisper error] job={job_id} rc={wresult.returncode}\n{full_err}", flush=True)
-                job["status"] = "error"
-                job["message"] = f"Transcription failed: {full_err[:500]}"
-                job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "error"}
+            if not _transcribe_existing_file(job_id, file_path, model_size):
+                check_queue_and_cleanup()
                 return
 
-            json_file = _find_whisper_json(file_path, job_id)
-
-            if json_file:
-                with open(json_file) as jf:
-                    data = json.load(jf)
-                _store_completed_transcript(job, model_size, data)
-                json_file.unlink(missing_ok=True)
-            else:
-                stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
-                job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
-                job["timestamped"] = ""
-                job["transcripts"][model_size] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
-
-        for ext in ['.srt', '.vtt', '.txt', '.tsv']:
-            cleanup = file_path.with_suffix(ext)
-            if cleanup.exists():
-                cleanup.unlink(missing_ok=True)
-
+        _clear_job_failure(job)
         job["status"] = "done"
+        job["stage"] = "done"
         job["message"] = "Complete"
         check_queue_and_cleanup()
 
     except subprocess.TimeoutExpired:
         job["status"] = "error"
-        job["message"] = "Process timed out."
+        job["stage"] = "error"
+        job["failure_code"] = "timeout"
+        job["message"] = "An unexpected processing stage timed out. See the server log for details."
         check_queue_and_cleanup()
     except Exception as e:
         job["status"] = "error"
@@ -621,6 +769,8 @@ def process():
         "available_formats": {"video": [], "audio": []},
         "downloaded_quality": "Best",
         "file_status": "absent",
+        "stage": "queued",
+        "retryable": False,
     }
 
     added, error = _add_job(job_id, job)
@@ -684,6 +834,8 @@ def upload():
         "_subtitle_tracks": {},
         "model": model_size,
         "file_status": "absent",
+        "stage": "queued",
+        "retryable": False,
     }
 
     added, error = _add_job(job_id, job)
@@ -744,57 +896,23 @@ def merge_job(job_id):
         if job["status"] == "done":
             file_path = job.get("_file_path", "")
             if file_path and Path(file_path).exists():
-                job["status"] = "transcribing"
-                job["message"] = "Transcribing audio..."
-                if "transcripts" not in job:
-                    job["transcripts"] = {}
-                job["transcripts"][model_size] = {"transcript": "", "timestamped": "", "status": "transcribing"}
-
                 merge_model = model_size  # capture for closure
+                job["status"] = "queued"
+                job["message"] = "Transcription queued..."
 
                 def run_transcription():
                     try:
-                        downloaded = Path(file_path)
-                        whisper_cmd = [
-                            "whisper", str(downloaded),
-                            "--model", merge_model,
-                            "--output_format", "json",
-                            "--output_dir", str(WORK_DIR),
-                        ]
-                        wresult = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
-                        if wresult.returncode != 0:
-                            job["status"] = "error"
-                            job["message"] = f"Transcription failed: {wresult.stderr[:200]}"
-                            job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
+                        if not _transcribe_existing_file(job_id, file_path, merge_model):
+                            check_queue_and_cleanup()
                             return
-
-                        json_file = _find_whisper_json(downloaded, job_id)
-
-                        if json_file:
-                            with open(json_file) as jf:
-                                jdata = json.load(jf)
-                            _store_completed_transcript(job, merge_model, jdata)
-                            json_file.unlink(missing_ok=True)
-                        else:
-                            stderr_hint = (wresult.stderr or wresult.stdout or "")[:300]
-                            job["transcript"] = f"Transcription output not found. Whisper output: {stderr_hint}" if stderr_hint else "Transcription output not found."
-                            job["transcripts"][merge_model] = {"transcript": job["transcript"], "timestamped": "", "status": "error"}
-
-                        for ext in ['.srt', '.vtt', '.txt', '.tsv']:
-                            c = downloaded.with_suffix(ext)
-                            if c.exists():
-                                c.unlink(missing_ok=True)
-
+                        _clear_job_failure(job)
                         job["status"] = "done"
+                        job["stage"] = "done"
                         job["message"] = "Complete"
-                        check_queue_and_cleanup()
-                    except subprocess.TimeoutExpired:
-                        job["status"] = "error"
-                        job["message"] = "Transcription timed out."
-                        job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
                         check_queue_and_cleanup()
                     except Exception as e:
                         job["status"] = "error"
+                        job["stage"] = "error"
                         job["message"] = f"Error: {str(e)}"
                         job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
                         check_queue_and_cleanup()
@@ -802,7 +920,6 @@ def merge_job(job_id):
                 if not _submit_job(run_transcription):
                     job["status"] = "error"
                     job["message"] = "Job queue is full. Try again after another job finishes."
-                    job["transcripts"][merge_model] = {"transcript": "", "timestamped": "", "status": "error"}
                     return jsonify({"error": job["message"]}), 429
             else:
                 job["status"] = "error"
@@ -834,55 +951,94 @@ def retranscribe(job_id):
     if not file_path or not Path(file_path).exists():
         return jsonify({"error": "Source file was cleaned up. Resubmit the URL to transcribe with a different model."}), 410
 
-    # Mark as transcribing
-    if "transcripts" not in job:
-        job["transcripts"] = {}
-    job.setdefault("_subtitle_tracks", {}).pop(model, None)
-    job["transcripts"][model] = {"transcript": "", "timestamped": "", "status": "transcribing"}
+    # Mark as transcribing before the worker starts so the UI can switch tabs immediately.
+    _begin_transcription(job, model, affect_job_status=False)
 
     rt_model = model  # capture for closure
 
     def do_retranscribe():
         try:
-            downloaded = Path(file_path)
-            whisper_cmd = [
-                "whisper", str(downloaded),
-                "--model", rt_model,
-                "--output_format", "json",
-                "--output_dir", str(WORK_DIR),
-            ]
-            result = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=600)
-
-            if result.returncode != 0:
-                job["transcripts"][rt_model] = {"transcript": "", "timestamped": "", "status": "error"}
-                return
-
-            json_file = _find_whisper_json(downloaded, job_id)
-
-            if json_file:
-                with open(json_file) as jf:
-                    jdata = json.load(jf)
-                _store_completed_transcript(job, rt_model, jdata, make_primary=False)
-                json_file.unlink(missing_ok=True)
-            else:
-                stderr_hint = (result.stderr or result.stdout or "")[:300]
-                job["transcripts"][rt_model] = {"transcript": f"Output not found. Whisper: {stderr_hint}" if stderr_hint else "Output not found.", "timestamped": "", "status": "error"}
-
-            for ext in ['.srt', '.vtt', '.txt', '.tsv']:
-                c = downloaded.with_suffix(ext)
-                if c.exists():
-                    c.unlink(missing_ok=True)
-
-        except subprocess.TimeoutExpired:
-            job["transcripts"][rt_model] = {"transcript": "", "timestamped": "", "status": "error"}
+            _transcribe_existing_file(
+                job_id,
+                file_path,
+                rt_model,
+                make_primary=False,
+                affect_job_status=False,
+            )
         except Exception as e:
-            job["transcripts"][rt_model] = {"transcript": "", "timestamped": "", "status": "error"}
+            _record_transcription_failure(
+                job,
+                rt_model,
+                f"Error: {str(e)}",
+                "exception",
+                0,
+                affect_job_status=False,
+            )
 
     if not _submit_job(do_retranscribe):
         job["transcripts"].pop(model, None)
         return jsonify({"error": "Job queue is full. Try again after another job finishes."}), 429
 
     return jsonify({"ok": True, "model": model})
+
+
+def _retry_transcription_job(job_id, file_path, model):
+    job = jobs[job_id]
+    try:
+        if not _transcribe_existing_file(job_id, file_path, model):
+            check_queue_and_cleanup()
+            return
+        _clear_job_failure(job)
+        job["status"] = "done"
+        job["stage"] = "done"
+        job["message"] = "Complete"
+        check_queue_and_cleanup()
+    except Exception as error:
+        _record_transcription_failure(
+            job,
+            model,
+            f"Retry failed: {str(error)}",
+            "exception",
+            0,
+        )
+        check_queue_and_cleanup()
+
+
+@app.route("/retry/<job_id>", methods=["POST"])
+def retry_job(job_id):
+    """Retry a recoverable transcription without re-uploading the media."""
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job.get("status") != "error" or not job.get("retryable"):
+            return jsonify({"error": "This job is not retryable"}), 409
+        if job.get("failure_stage") != "transcription":
+            return jsonify({"error": "Only retained transcription failures can be retried"}), 409
+
+        file_path = job.get("_file_path", "")
+        if not file_path or not Path(file_path).exists():
+            job["retryable"] = False
+            job["file_status"] = "cleaned"
+            return jsonify({"error": "The retained source is no longer available"}), 410
+
+        model = job.get("model", "base")
+        if model not in ("tiny", "base", "small", "medium"):
+            model = "base"
+        job["status"] = "queued"
+        job["stage"] = "queued"
+        job["message"] = "Retry queued..."
+        job["retryable"] = False
+
+    if not _submit_job(_retry_transcription_job, job_id, file_path, model):
+        with jobs_lock:
+            job["status"] = "error"
+            job["stage"] = "error"
+            job["message"] = "Job queue is full. Try Retry again after another job finishes."
+            job["retryable"] = True
+        return jsonify({"error": job["message"]}), 429
+
+    return jsonify({"ok": True, "status": "queued", "model": model}), 202
 
 
 @app.route("/saved-cookies")
@@ -1082,6 +1238,8 @@ def redownload(job_id):
         "available_formats": source_job.get("available_formats", {"video": [], "audio": []}),
         "downloaded_quality": quality_label,
         "file_status": "absent",
+        "stage": "queued",
+        "retryable": False,
     }
 
     added, error = _add_job(new_job_id, new_job_data)
@@ -1111,7 +1269,13 @@ def redownload(job_id):
                 cmd.extend(["--extractor-retries", "5"])
 
             cmd.extend(["--", url])
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            download_started = time.monotonic()
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            )
 
             if result.returncode != 0:
                 new_job["status"] = "error"
@@ -1146,8 +1310,17 @@ def redownload(job_id):
             check_queue_and_cleanup()
 
         except subprocess.TimeoutExpired:
+            elapsed = max(0, int(round(time.monotonic() - download_started)))
             new_job["status"] = "error"
-            new_job["message"] = "Download timed out."
+            new_job["stage"] = "error"
+            new_job["failure_stage"] = "download"
+            new_job["failure_code"] = "timeout"
+            new_job["elapsed_seconds"] = elapsed
+            new_job["timeout_seconds"] = DOWNLOAD_TIMEOUT_SECONDS
+            new_job["message"] = (
+                f"Download timed out after {format_duration(elapsed)} "
+                f"(limit: {format_duration(DOWNLOAD_TIMEOUT_SECONDS)})."
+            )
             check_queue_and_cleanup()
         except Exception as e:
             new_job["status"] = "error"
@@ -1196,14 +1369,16 @@ def check_queue_and_cleanup():
     Skips files that are still marked download_ready (user hasn't saved yet)."""
     if not jobs:
         return
-    all_terminal = all(j.get("status") in ("done", "error") for j in jobs.values())
-    if not all_terminal:
+    if has_active_jobs(jobs.values()):
         return
     for job in jobs.values():
         if job.get("file_status") != "present":
             continue
         # Don't delete files the user hasn't downloaded yet
         if job.get("download_ready"):
+            continue
+        # Recoverable failures keep their media until Retry, Clear, or shutdown.
+        if job.get("retryable"):
             continue
         file_path = job.get("_file_path", "")
         if file_path:
@@ -1251,11 +1426,19 @@ def heartbeat():
     return jsonify({"ok": True})
 
 
+def _should_shutdown_for_inactivity(now=None):
+    current_time = time.time() if now is None else now
+    if current_time - _last_heartbeat <= _HEARTBEAT_TIMEOUT:
+        return False
+    with jobs_lock:
+        return not has_active_jobs(jobs.values())
+
+
 def _heartbeat_watchdog():
     """Background thread: check heartbeat, shut down if browser tab is gone."""
     while True:
         time.sleep(30)
-        if time.time() - _last_heartbeat > _HEARTBEAT_TIMEOUT:
+        if _should_shutdown_for_inactivity():
             print("\nNo browser heartbeat for 5 minutes — shutting down.")
             cleanup_downloads_dir()
             os.kill(os.getpid(), signal.SIGTERM)

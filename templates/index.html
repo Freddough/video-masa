@@ -1406,7 +1406,7 @@
                 const job = {
                     id: data.job_id, label: makeLabel(url), url,
                     doTranscribe: doT, doDownload: doD,
-                    status: 'queued', message: 'Queued...',
+                    status: 'queued', message: 'Queued...', retryable: false,
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
                     title: '', thumbnail: '', merged: false,
@@ -1443,7 +1443,7 @@
                 const job = {
                     id: data.job_id, label: file.name, url: '',
                     doTranscribe: doT, doDownload: doD,
-                    status: 'queued', message: 'Queued...',
+                    status: 'queued', message: 'Queued...', retryable: false,
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
                     title: '', merged: false,
@@ -1466,6 +1466,7 @@
                     const prevStatus = job.status;
                     const prevDownloadReady = job.downloadReady;
                     const prevFileStatus = job.fileStatus;
+                    const prevRetryable = job.retryable;
                     const hadTitle = !!job.title;
                     const hadThumb = !!job.thumbnail;
 
@@ -1478,6 +1479,8 @@
                     job.title = data.title || job.title;
                     job.thumbnail = data.thumbnail || job.thumbnail;
                     job.fileStatus = data.file_status || job.fileStatus;
+                    job.retryable = !!data.retryable;
+                    job.failureStage = data.failure_stage || '';
                     if (data.available_formats) {
                         const af = data.available_formats;
                         if (af.video && af.video.length || af.audio && af.audio.length) job.availableFormats = af;
@@ -1491,7 +1494,7 @@
                     }
 
                     // Structural change (status transition, download ready, title/thumbnail appeared) → full re-render
-                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || job.fileStatus !== prevFileStatus || (job.title && !hadTitle) || (job.thumbnail && !hadThumb)) {
+                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || job.fileStatus !== prevFileStatus || job.retryable !== prevRetryable || (job.title && !hadTitle) || (job.thumbnail && !hadThumb)) {
                         renderQueue();
                     } else {
                         // Steady state → only update the message text in-place
@@ -1685,6 +1688,20 @@
             return null;
         }
 
+        function makeRetryResults(job) {
+            const block = makeEl('div', 'result-block');
+            const header = makeEl('div', 'result-header');
+            header.append(makeEl('span', 'result-title', 'Source retained'));
+            const row = makeEl('div', 'file-ready-row');
+            const button = makeEl('button', 'dl-btn', '↻ Retry transcription');
+            button.type = 'button';
+            button.title = 'Retry using the retained media without uploading again';
+            button.addEventListener('click', () => retryJob(job, button));
+            row.appendChild(button);
+            block.append(header, row);
+            return block;
+        }
+
         // ─── Render (all job-controlled values are assigned through DOM properties/textContent) ───
         function renderQueue() {
             const container = document.getElementById('queueContainer');
@@ -1788,6 +1805,9 @@
                     const transcriptResults = makeTranscriptResults(job, idx);
                     if (transcriptResults) results.appendChild(transcriptResults);
                 }
+                if (job.status === 'error' && job.retryable) {
+                    results.appendChild(makeRetryResults(job));
+                }
                 if (results.childElementCount) bodyChildren.push(results);
                 cardBody.replaceChildren(...bodyChildren);
 
@@ -1812,6 +1832,35 @@
                 btn.style.borderColor = 'var(--lime)';
                 setTimeout(() => { btn.textContent = prev; btn.style.color = ''; btn.style.borderColor = ''; }, 1500);
             });
+        }
+
+        async function retryJob(job, button) {
+            button.disabled = true;
+            const originalText = button.textContent;
+            button.textContent = 'Queueing...';
+            try {
+                const response = await fetch(`/retry/${job.id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await response.json();
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || 'Retry failed');
+                }
+                job.status = 'queued';
+                job.message = 'Retry queued...';
+                job.retryable = false;
+                if (job.transcripts && job.transcripts[data.model]) {
+                    job.transcripts[data.model].status = 'transcribing';
+                }
+                renderQueue();
+                pollJob(job);
+            } catch (error) {
+                button.disabled = false;
+                button.textContent = originalText;
+                alert('Retry failed: ' + error.message);
+            }
         }
 
         function downloadSrt(jobId, model) {
@@ -2068,7 +2117,7 @@
                     url: sourceJob.url,
                     doTranscribe: false,
                     doDownload: true,
-                    status: 'queued',
+                    status: 'queued', retryable: false,
                     message: `Downloading at ${qualityLabel}...`,
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',

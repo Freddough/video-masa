@@ -35,7 +35,7 @@ API_TOKEN=""
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.1.0"
+    APP_VERSION="3.1.1"
 fi
 
 mkdir -p "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR"
