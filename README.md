@@ -48,7 +48,7 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-3.1.0.dmg
+# macOS — creates dist/VideoMasa-3.1.1.dmg
 bash packaging/macos/build_dmg.sh
 
 # Windows — creates the versioned Windows zip
@@ -68,7 +68,7 @@ For a signed and notarized macOS release candidate, pass the DMG to include the
 artifact integrity, Gatekeeper, stapling, bundle-signature, and version gates:
 
 ```bash
-scripts/validate_release.sh dist/VideoMasa-3.1.0.dmg
+scripts/validate_release.sh dist/VideoMasa-3.1.1.dmg
 ```
 
 The incremental backend modularization decision is documented in
@@ -97,6 +97,19 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 | medium | Slowest  | Best     | ~1.5 GB  |
 
 Model and preference selections are remembered between sessions.
+
+For unusually long media, the desktop app allows 30 minutes for downloading and
+4 hours for Whisper transcription by default. Source media is retained after a
+transcription failure so the job can be retried without another upload. Advanced
+source users can override the limits with `VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS`
+and `VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS`.
+
+## What's new in v3.1.1
+
+- **Long-form transcription reliability** — raises the default Whisper limit from 10 minutes to 4 hours and reports the exact failed stage, elapsed time, and configured limit
+- **Retry without re-uploading** — retains source media after transcription failures and adds an in-app Retry action
+- **Active-job protection** — inactivity shutdown and cleanup no longer interrupt downloads or transcriptions, including extra-model transcription jobs
+- **Consistent failure state** — the job card and each transcript model now agree when Whisper times out, fails to start, or produces invalid output
 
 ## What's new in v3.1.0
 
