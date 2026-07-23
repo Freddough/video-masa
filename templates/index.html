@@ -640,6 +640,28 @@
             font-size: 12px;
             color: var(--text-dim);
         }
+        .job-progress {
+            margin-top: 9px;
+        }
+        .job-progress-track {
+            height: 4px;
+            overflow: hidden;
+            border-radius: 999px;
+            background: var(--surface-3);
+        }
+        .job-progress-fill {
+            width: 0;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, var(--amber), var(--lime));
+            transition: width 220ms ease;
+        }
+        .job-progress-meta, .resume-meta {
+            margin-top: 5px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            color: var(--text-faint);
+        }
 
         .dot {
             width: 6px;
@@ -1407,6 +1429,7 @@
                     id: data.job_id, label: makeLabel(url), url,
                     doTranscribe: doT, doDownload: doD,
                     status: 'queued', message: 'Queued...', retryable: false,
+                    resumeAvailable: false, progress: null,
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
                     title: '', thumbnail: '', merged: false,
@@ -1444,6 +1467,7 @@
                     id: data.job_id, label: file.name, url: '',
                     doTranscribe: doT, doDownload: doD,
                     status: 'queued', message: 'Queued...', retryable: false,
+                    resumeAvailable: false, progress: null,
                     transcript: '', timestamped: '',
                     downloadReady: false, filename: '',
                     title: '', merged: false,
@@ -1467,6 +1491,7 @@
                     const prevDownloadReady = job.downloadReady;
                     const prevFileStatus = job.fileStatus;
                     const prevRetryable = job.retryable;
+                    const prevProgressMode = job.progress && job.progress.mode;
                     const hadTitle = !!job.title;
                     const hadThumb = !!job.thumbnail;
 
@@ -1480,6 +1505,8 @@
                     job.thumbnail = data.thumbnail || job.thumbnail;
                     job.fileStatus = data.file_status || job.fileStatus;
                     job.retryable = !!data.retryable;
+                    job.resumeAvailable = !!data.resume_available;
+                    job.progress = data.progress || null;
                     job.failureStage = data.failure_stage || '';
                     if (data.available_formats) {
                         const af = data.available_formats;
@@ -1494,7 +1521,7 @@
                     }
 
                     // Structural change (status transition, download ready, title/thumbnail appeared) → full re-render
-                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || job.fileStatus !== prevFileStatus || job.retryable !== prevRetryable || (job.title && !hadTitle) || (job.thumbnail && !hadThumb)) {
+                    if (job.status !== prevStatus || job.downloadReady !== prevDownloadReady || job.fileStatus !== prevFileStatus || job.retryable !== prevRetryable || (job.progress && job.progress.mode) !== prevProgressMode || (job.title && !hadTitle) || (job.thumbnail && !hadThumb)) {
                         renderQueue();
                     } else {
                         // Steady state → only update the message text in-place
@@ -1511,6 +1538,10 @@
             if (!card) return;
             const msgEl = card.querySelector('.job-msg');
             if (msgEl) msgEl.textContent = 'Status: ' + job.message;
+            const fill = card.querySelector('.job-progress-fill');
+            if (fill && job.progress) fill.style.width = `${Math.max(0, Math.min(100, job.progress.percent || 0))}%`;
+            const meta = card.querySelector('.job-progress-meta');
+            if (meta && job.progress) meta.textContent = progressLabel(job.progress);
         }
 
         function makeEl(tag, className, text) {
@@ -1691,15 +1722,46 @@
         function makeRetryResults(job) {
             const block = makeEl('div', 'result-block');
             const header = makeEl('div', 'result-header');
-            header.append(makeEl('span', 'result-title', 'Source retained'));
+            header.append(makeEl('span', 'result-title', job.resumeAvailable ? 'Checkpoint saved' : 'Source retained'));
             const row = makeEl('div', 'file-ready-row');
-            const button = makeEl('button', 'dl-btn', '↻ Retry transcription');
+            if (job.resumeAvailable && job.progress) {
+                row.append(makeEl(
+                    'div',
+                    'resume-meta',
+                    `${job.progress.completed || 0} of ${job.progress.total || 0} chunks complete`
+                ));
+            }
+            const button = makeEl('button', 'dl-btn', job.resumeAvailable ? '↻ Resume transcription' : '↻ Retry transcription');
             button.type = 'button';
-            button.title = 'Retry using the retained media without uploading again';
+            button.title = job.resumeAvailable
+                ? 'Continue from the last completed checkpoint'
+                : 'Retry using the retained media without uploading again';
             button.addEventListener('click', () => retryJob(job, button));
             row.appendChild(button);
             block.append(header, row);
             return block;
+        }
+
+        function progressLabel(progress) {
+            if (!progress || progress.mode !== 'chunked') return '';
+            if (progress.phase === 'preparing') return 'Preparing checkpointed audio';
+            if (progress.phase === 'finalizing') return 'Rebuilding original timestamps';
+            const total = progress.total || 0;
+            const completed = progress.completed || 0;
+            const current = progress.current;
+            if (current && total) return `Chunk ${current} of ${total} · ${completed} saved · ${progress.percent || 0}%`;
+            return `${completed} of ${total} chunks saved · ${progress.percent || 0}%`;
+        }
+
+        function makeJobProgress(job) {
+            if (job.status !== 'transcribing' || !job.progress || job.progress.mode !== 'chunked') return null;
+            const wrap = makeEl('div', 'job-progress');
+            const track = makeEl('div', 'job-progress-track');
+            const fill = makeEl('div', 'job-progress-fill');
+            fill.style.width = `${Math.max(0, Math.min(100, job.progress.percent || 0))}%`;
+            track.appendChild(fill);
+            wrap.append(track, makeEl('div', 'job-progress-meta', progressLabel(job.progress)));
+            return wrap;
         }
 
         // ─── Render (all job-controlled values are assigned through DOM properties/textContent) ───
@@ -1796,6 +1858,8 @@
                 const status = makeEl('div', 'job-status');
                 status.append(makeEl('div', `dot ${dotClass}`), makeEl('span', 'job-msg', `Status: ${job.message}`));
                 content.appendChild(status);
+                const progress = makeJobProgress(job);
+                if (progress) content.appendChild(progress);
                 inner.appendChild(content);
 
                 const bodyChildren = [inner];
@@ -1849,7 +1913,7 @@
                     throw new Error(data.error || 'Retry failed');
                 }
                 job.status = 'queued';
-                job.message = 'Retry queued...';
+                job.message = job.resumeAvailable ? 'Resume queued...' : 'Retry queued...';
                 job.retryable = false;
                 if (job.transcripts && job.transcripts[data.model]) {
                     job.transcripts[data.model].status = 'transcribing';

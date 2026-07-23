@@ -1,7 +1,9 @@
+import json
 import os
 import subprocess
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +18,14 @@ from videomasa.security import (
     validated_url,
 )
 from videomasa.subtitles import build_srt, format_srt_timestamp, parse_whisper_result
-from videomasa.transcription import TranscriptionTimeout, transcribe_with_whisper
+from videomasa.transcription import (
+    LongFormTranscriptionFailure,
+    TranscriptionTimeout,
+    checkpoint_directory,
+    probe_media_duration,
+    transcribe_long_form,
+    transcribe_with_whisper,
+)
 
 
 class ConfigTests(unittest.TestCase):
@@ -128,6 +137,20 @@ class JobStateTests(unittest.TestCase):
 
 
 class TranscriptionExecutionTests(unittest.TestCase):
+    def test_ffmpeg_duration_probe_parses_hours_minutes_and_seconds(self) -> None:
+        def fake_runner(command, **_kwargs):
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                "",
+                "Duration: 01:02:03.45, start: 0.000000, bitrate: 128 kb/s",
+            )
+
+        self.assertEqual(
+            probe_media_duration("podcast.mp4", "/ffmpeg", runner=fake_runner),
+            3723.45,
+        )
+
     def test_timeout_reports_configured_limit_and_measured_elapsed_time(self) -> None:
         timeout = subprocess.TimeoutExpired(["whisper"], 25)
         with (
@@ -140,6 +163,94 @@ class TranscriptionExecutionTests(unittest.TestCase):
         self.assertEqual(caught.exception.timeout_seconds, 25)
         self.assertEqual(caught.exception.elapsed_seconds, 25.5)
         self.assertEqual(caught.exception.command[0], "whisper")
+
+    def test_long_form_retry_skips_checkpointed_chunks_and_merges_offsets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "podcast.mp4"
+            source.write_bytes(b"source")
+            checkpoint = checkpoint_directory(root, "abc123", "base")
+
+            def write_wav(path, seconds=1):
+                with wave.open(str(path), "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(16_000)
+                    audio.writeframes(b"\0\0" * 16_000 * seconds)
+
+            def fake_ffmpeg(command, **_kwargs):
+                pattern = Path(command[-1])
+                pattern.parent.mkdir(parents=True, exist_ok=True)
+                for index in range(3):
+                    write_wav(pattern.parent / f"chunk-{index:05d}.wav")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            first_attempt_calls = []
+
+            def interrupted_whisper(chunk, _model, _output_dir, _timeout):
+                index = int(Path(chunk).stem.rsplit("-", 1)[1])
+                first_attempt_calls.append(index)
+                if index == 1:
+                    return subprocess.CompletedProcess(["whisper"], 1, "", "GPU stopped"), 2.0
+                Path(chunk).with_suffix(".json").write_text(json.dumps({
+                    "text": f"chunk {index}",
+                    "segments": [{"start": 0.2, "end": 0.8, "text": f" chunk {index} "}],
+                }))
+                return subprocess.CompletedProcess(["whisper"], 0, "", ""), 1.5
+
+            with self.assertRaises(LongFormTranscriptionFailure) as caught:
+                transcribe_long_form(
+                    source,
+                    "base",
+                    checkpoint,
+                    "/ffmpeg",
+                    chunk_seconds=600,
+                    preparation_timeout=30,
+                    chunk_timeout=120,
+                    runner=fake_ffmpeg,
+                    whisper_runner=interrupted_whisper,
+                )
+
+            self.assertEqual(first_attempt_calls, [0, 1])
+            self.assertEqual(caught.exception.code, "process_error")
+            self.assertEqual(caught.exception.completed_chunks, 1)
+            self.assertEqual(caught.exception.chunk_number, 2)
+
+            resumed_calls = []
+            progress = []
+
+            def resumed_whisper(chunk, _model, _output_dir, _timeout):
+                index = int(Path(chunk).stem.rsplit("-", 1)[1])
+                resumed_calls.append(index)
+                Path(chunk).with_suffix(".json").write_text(json.dumps({
+                    "text": f"chunk {index}",
+                    "segments": [{"start": 0.2, "end": 0.8, "text": f" chunk {index} "}],
+                }))
+                return subprocess.CompletedProcess(["whisper"], 0, "", ""), 2.0
+
+            outcome = transcribe_long_form(
+                source,
+                "base",
+                checkpoint,
+                "/ffmpeg",
+                chunk_seconds=600,
+                preparation_timeout=30,
+                chunk_timeout=120,
+                runner=fake_ffmpeg,
+                whisper_runner=resumed_whisper,
+                progress_callback=progress.append,
+            )
+
+            self.assertEqual(resumed_calls, [1, 2])
+            self.assertEqual(outcome.resumed_chunks, 1)
+            self.assertEqual(outcome.total_chunks, 3)
+            self.assertEqual(outcome.whisper_data["text"], "chunk 0 chunk 1 chunk 2")
+            self.assertEqual(
+                [segment["start"] for segment in outcome.whisper_data["segments"]],
+                [0.2, 1.2, 2.2],
+            )
+            self.assertEqual(progress[-1]["phase"], "finalizing")
+            self.assertEqual(progress[-1]["percent"], 100)
 
 
 if __name__ == "__main__":
