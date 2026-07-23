@@ -18,7 +18,11 @@ os.environ["VIDEOMASA_COOKIES_DIR"] = str(STATE_ROOT / "cookies")
 os.environ["VIDEOMASA_SKIP_HEALTH_CHECKS"] = "1"
 
 import app as videomasa
-from videomasa.transcription import TranscriptionTimeout
+from videomasa.transcription import (
+    LongFormResult,
+    LongFormTranscriptionFailure,
+    TranscriptionTimeout,
+)
 
 
 BASE_URL = "http://127.0.0.1:18765"
@@ -219,6 +223,165 @@ class StabilizationTests(unittest.TestCase):
         self.assertEqual(job["file_status"], "present")
         source.unlink(missing_ok=True)
 
+    def test_long_form_failure_exposes_checkpoint_progress_and_resume(self) -> None:
+        source = videomasa.WORK_DIR / "checkpointed-podcast.wav"
+        source.write_bytes(b"synthetic long audio")
+        videomasa.jobs["checkpointed"] = {
+            "status": "queued",
+            "message": "Queued...",
+            "transcript": "",
+            "timestamped": "",
+            "download_ready": False,
+            "download_path": "",
+            "filename": source.name,
+            "title": "Checkpointed Podcast",
+            "thumbnail": "",
+            "url": "",
+            "do_transcribe": True,
+            "do_download": False,
+            "transcripts": {},
+            "_subtitle_tracks": {},
+            "model": "base",
+            "file_status": "present",
+            "stage": "queued",
+            "retryable": False,
+        }
+
+        def interrupted_long_form(*_args, progress_callback, **_kwargs):
+            progress_callback({
+                "mode": "chunked",
+                "phase": "transcribing",
+                "completed": 2,
+                "total": 4,
+                "current": 3,
+                "percent": 50,
+                "resumed": 0,
+            })
+            raise LongFormTranscriptionFailure(
+                "process_error",
+                "A long-form transcription chunk failed.",
+                completed_chunks=2,
+                total_chunks=4,
+                chunk_number=3,
+                technical_detail="simulated failure",
+            )
+
+        with (
+            patch("app.probe_media_duration", return_value=2400),
+            patch("app.transcribe_long_form", side_effect=interrupted_long_form),
+        ):
+            videomasa.run_file_job("checkpointed", source, "base", True, False)
+
+        job = videomasa.jobs["checkpointed"]
+        self.assertEqual(job["status"], "error")
+        self.assertTrue(job["retryable"])
+        self.assertTrue(job["resume_available"])
+        self.assertEqual(job["progress"]["completed"], 2)
+        self.assertEqual(job["progress"]["total"], 4)
+        self.assertIn("chunk 3 of 4", job["message"])
+        self.assertIn("choose Resume", job["message"])
+        self.assertTrue(source.exists())
+
+        def resumed_long_form(*_args, progress_callback, **_kwargs):
+            progress_callback({
+                "mode": "chunked",
+                "phase": "finalizing",
+                "completed": 4,
+                "total": 4,
+                "current": None,
+                "percent": 100,
+                "resumed": 2,
+            })
+            return LongFormResult(
+                {
+                    "text": "Resumed podcast",
+                    "segments": [{"start": 1200.25, "end": 1202.5, "text": " Resumed podcast "}],
+                },
+                42.0,
+                4,
+                2,
+            )
+
+        def run_synchronously(function, *args):
+            function(*args)
+            return True
+
+        self.bootstrap()
+        with (
+            patch("app.probe_media_duration", return_value=2400),
+            patch("app.transcribe_long_form", side_effect=resumed_long_form),
+            patch("app._submit_job", side_effect=run_synchronously),
+        ):
+            response = self.client.post("/retry/checkpointed", base_url=BASE_URL, json={})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"]["resumed"], 2)
+        self.assertEqual(job["transcript"], "Resumed podcast")
+        self.assertFalse(source.exists())
+
+    def test_long_form_success_uses_merged_timestamps_and_finishes_progress(self) -> None:
+        source = videomasa.WORK_DIR / "long-success.wav"
+        source.write_bytes(b"synthetic long audio")
+        videomasa.jobs["long-success"] = {
+            "status": "queued",
+            "message": "Queued...",
+            "transcript": "",
+            "timestamped": "",
+            "download_ready": False,
+            "download_path": "",
+            "filename": source.name,
+            "title": "Long Success",
+            "thumbnail": "",
+            "url": "",
+            "do_transcribe": True,
+            "do_download": False,
+            "transcripts": {},
+            "_subtitle_tracks": {},
+            "model": "base",
+            "file_status": "present",
+            "stage": "queued",
+            "retryable": False,
+        }
+
+        def successful_long_form(*_args, progress_callback, **_kwargs):
+            progress_callback({
+                "mode": "chunked",
+                "phase": "finalizing",
+                "completed": 3,
+                "total": 3,
+                "current": None,
+                "percent": 100,
+                "resumed": 1,
+            })
+            return LongFormResult(
+                {
+                    "text": "Beginning Ending",
+                    "segments": [
+                        {"start": 0.25, "end": 2.0, "text": " Beginning "},
+                        {"start": 1200.5, "end": 1202.0, "text": " Ending "},
+                    ],
+                },
+                90.0,
+                3,
+                1,
+            )
+
+        with (
+            patch("app.probe_media_duration", return_value=1800),
+            patch("app.transcribe_long_form", side_effect=successful_long_form),
+        ):
+            videomasa.run_file_job("long-success", source, "base", True, False)
+
+        job = videomasa.jobs["long-success"]
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["progress"]["percent"], 100)
+        self.assertEqual(job["progress"]["resumed"], 1)
+        self.assertEqual(job["_subtitle_tracks"]["base"][1]["start"], 1200.5)
+        self.assertTrue(job["transcripts"]["base"]["srt_ready"])
+        self.assertFalse(job["retryable"])
+        self.assertFalse(source.exists())
+
     def test_invalid_whisper_output_retains_source_for_retry(self) -> None:
         source = videomasa.WORK_DIR / "invalid-output-podcast.wav"
         source.write_bytes(b"synthetic audio")
@@ -356,6 +519,9 @@ class StabilizationTests(unittest.TestCase):
         self.assertIn("downloadSrt(job.id, activeModel)", template)
         self.assertIn("retryJob(job, button)", template)
         self.assertIn("/retry/${job.id}", template)
+        self.assertIn("makeJobProgress(job)", template)
+        self.assertIn("Resume transcription", template)
+        self.assertIn("job.progress = data.progress || null", template)
 
 
 if __name__ == "__main__":

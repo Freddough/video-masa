@@ -33,14 +33,22 @@ from videomasa.security import (
     validated_url,
 )
 from videomasa.subtitles import build_srt, parse_whisper_result
-from videomasa.transcription import TranscriptionTimeout, transcribe_with_whisper
+from videomasa.transcription import (
+    LongFormTranscriptionFailure,
+    TranscriptionTimeout,
+    checkpoint_directory,
+    cleanup_checkpoint,
+    probe_media_duration,
+    transcribe_long_form,
+    transcribe_with_whisper,
+)
 
 os.umask(0o077)
 app = Flask(__name__)
 
 
 def _read_app_version():
-    return read_app_version(__file__, "3.1.1")
+    return read_app_version(__file__, "3.2.0")
 
 
 APP_VERSION = _read_app_version()
@@ -56,6 +64,12 @@ MAX_PENDING_JOBS = int_from_env("VIDEOMASA_MAX_PENDING_JOBS", 8)
 MAX_RETAINED_JOBS = int_from_env("VIDEOMASA_MAX_RETAINED_JOBS", 100)
 DOWNLOAD_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS", 1800))
 TRANSCRIPTION_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS", 14_400))
+LONG_FORM_THRESHOLD_SECONDS = max(60, int_from_env("VIDEOMASA_LONG_FORM_THRESHOLD_SECONDS", 1200))
+LONG_FORM_CHUNK_SECONDS = max(60, int_from_env("VIDEOMASA_LONG_FORM_CHUNK_SECONDS", 600))
+LONG_FORM_PREPARATION_TIMEOUT_SECONDS = max(
+    60,
+    int_from_env("VIDEOMASA_LONG_FORM_PREPARATION_TIMEOUT_SECONDS", 1800),
+)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
 
 
@@ -252,6 +266,7 @@ def _clear_job_failure(job):
     for key in ("failure_stage", "failure_code", "elapsed_seconds", "timeout_seconds", "stage_started_at"):
         job.pop(key, None)
     job["retryable"] = False
+    job["resume_available"] = False
 
 
 def _begin_transcription(job, model, affect_job_status=True):
@@ -273,6 +288,35 @@ def _begin_transcription(job, model, affect_job_status=True):
         )
 
 
+def _update_long_form_progress(job, model, progress, affect_job_status=True):
+    """Expose checkpoint progress without changing the existing polling contract."""
+    progress = dict(progress)
+    job.setdefault("transcripts", {}).setdefault(model, {})["progress"] = progress
+    if not affect_job_status:
+        return
+
+    job["progress"] = progress
+    job["resume_available"] = progress.get("completed", 0) > 0
+    phase = progress.get("phase")
+    completed = progress.get("completed", 0)
+    total = progress.get("total", 0)
+    percent = progress.get("percent", 0)
+    current = progress.get("current")
+    resumed = progress.get("resumed", 0)
+    if phase == "preparing":
+        job["message"] = "Preparing long recording for checkpointed transcription..."
+    elif phase == "transcribing" and total:
+        resume_note = f" Resumed with {resumed} saved." if resumed else ""
+        job["message"] = (
+            f"Transcribing chunk {current or completed + 1} of {total} "
+            f"({percent}% checkpointed).{resume_note}"
+        )
+    elif phase == "checkpointed":
+        job["message"] = f"Checkpoint saved: {completed} of {total} chunks ({percent}%)."
+    elif phase == "finalizing":
+        job["message"] = "All chunks transcribed. Rebuilding original timestamps..."
+
+
 def _record_transcription_failure(
     job,
     model,
@@ -282,6 +326,10 @@ def _record_transcription_failure(
     affect_job_status=True,
 ):
     elapsed = max(0, int(round(elapsed_seconds)))
+    model_progress = (
+        job.get("transcripts", {}).get(model, {}).get("progress")
+        or (job.get("progress") if affect_job_status else None)
+    )
     job.setdefault("transcripts", {})[model] = {
         "transcript": "",
         "timestamped": "",
@@ -289,6 +337,7 @@ def _record_transcription_failure(
         "error_code": code,
         "message": message,
         "elapsed_seconds": elapsed,
+        **({"progress": model_progress} if model_progress else {}),
     }
     if affect_job_status:
         job["status"] = "error"
@@ -299,6 +348,10 @@ def _record_transcription_failure(
         job["elapsed_seconds"] = elapsed
         job["timeout_seconds"] = TRANSCRIPTION_TIMEOUT_SECONDS
         job["retryable"] = bool(job.get("_file_path") and Path(job["_file_path"]).exists())
+        job["resume_available"] = bool(
+            job.get("progress", {}).get("mode") == "chunked"
+            and job.get("progress", {}).get("completed", 0) > 0
+        )
 
 
 def _cleanup_whisper_outputs(source_path):
@@ -316,6 +369,91 @@ def _transcribe_existing_file(job_id, source_path, model, make_primary=True, aff
     source = Path(source_path)
     _cleanup_whisper_outputs(source)
     _begin_transcription(job, model, affect_job_status=affect_job_status)
+
+    duration = probe_media_duration(source, FFMPEG_BIN)
+    if duration is not None:
+        job["media_duration_seconds"] = max(0, int(round(duration)))
+
+    if duration is not None and duration >= LONG_FORM_THRESHOLD_SECONDS:
+        checkpoint_dir = checkpoint_directory(WORK_DIR, job_id, model)
+        try:
+            outcome = transcribe_long_form(
+                source,
+                model,
+                checkpoint_dir,
+                FFMPEG_BIN,
+                chunk_seconds=LONG_FORM_CHUNK_SECONDS,
+                preparation_timeout=LONG_FORM_PREPARATION_TIMEOUT_SECONDS,
+                chunk_timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
+                progress_callback=lambda progress: _update_long_form_progress(
+                    job,
+                    model,
+                    progress,
+                    affect_job_status=affect_job_status,
+                ),
+            )
+        except LongFormTranscriptionFailure as error:
+            saved = (
+                f"{error.completed_chunks} of {error.total_chunks} chunks are safely checkpointed. "
+                if error.total_chunks
+                else ""
+            )
+            location = (
+                f" at chunk {error.chunk_number} of {error.total_chunks}"
+                if error.chunk_number and error.total_chunks
+                else ""
+            )
+            if error.code == "timeout":
+                limit = format_duration(error.timeout_seconds or TRANSCRIPTION_TIMEOUT_SECONDS)
+                message = (
+                    f"Long-form transcription paused{location} after "
+                    f"{format_duration(error.elapsed_seconds)} "
+                    f"(per-chunk limit: {limit}). {saved}"
+                    "The source was retained — choose Resume to continue."
+                )
+            else:
+                detail = f" {error.technical_detail[:300]}" if error.technical_detail else ""
+                message = (
+                    f"Long-form transcription paused{location}. {saved}"
+                    f"{str(error)}{detail} The source was retained — choose Resume to continue."
+                )
+            _record_transcription_failure(
+                job,
+                model,
+                message,
+                error.code,
+                error.elapsed_seconds,
+                affect_job_status=affect_job_status,
+            )
+            print(
+                f"[long-form {error.code}] job={job_id} model={model} "
+                f"chunk={error.chunk_number}/{error.total_chunks} "
+                f"completed={error.completed_chunks}",
+                flush=True,
+            )
+            return False
+
+        _store_completed_transcript(
+            job,
+            model,
+            outcome.whisper_data,
+            make_primary=make_primary,
+        )
+        cleanup_checkpoint(checkpoint_dir)
+        if affect_job_status:
+            _clear_job_failure(job)
+            job["progress"] = {
+                "mode": "chunked",
+                "phase": "done",
+                "completed": outcome.total_chunks,
+                "total": outcome.total_chunks,
+                "current": None,
+                "percent": 100,
+                "resumed": outcome.resumed_chunks,
+            }
+            job["stage"] = "finalizing"
+            job["elapsed_seconds"] = max(0, int(round(outcome.elapsed_seconds)))
+        return True
 
     try:
         result, elapsed = transcribe_with_whisper(
@@ -409,6 +547,7 @@ def _transcribe_existing_file(job_id, source_path, model, make_primary=True, aff
     _cleanup_whisper_outputs(source)
     if affect_job_status:
         _clear_job_failure(job)
+        job.pop("progress", None)
         job["stage"] = "finalizing"
         job["elapsed_seconds"] = max(0, int(round(elapsed)))
     return True
@@ -1356,9 +1495,13 @@ def cleanup_file(job_id):
     # Clean up thumbnail too
     thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
     thumb_path.unlink(missing_ok=True)
+    for model in ("tiny", "base", "small", "medium"):
+        cleanup_checkpoint(checkpoint_directory(WORK_DIR, job_id, model))
 
     job["file_status"] = "cleaned"
     job["download_ready"] = False
+    job["retryable"] = False
+    job["resume_available"] = False
     return jsonify({"ok": True})
 
 
@@ -1394,6 +1537,7 @@ def cleanup_downloads_dir():
         for f in WORK_DIR.iterdir():
             if f.is_file() and f.suffix in ('.mp4', '.mkv', '.webm', '.mov', '.m4a', '.mp3', '.wav', '.json', '.srt', '.vtt', '.txt', '.tsv', '.jpg'):
                 f.unlink(missing_ok=True)
+        shutil.rmtree(WORK_DIR / ".checkpoints", ignore_errors=True)
     except Exception:
         pass
 

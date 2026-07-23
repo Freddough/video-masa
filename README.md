@@ -48,7 +48,7 @@ Both packages handle Python environment setup and dependency installation automa
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-3.1.1.dmg
+# macOS — creates dist/VideoMasa-3.2.0.dmg
 bash packaging/macos/build_dmg.sh
 
 # Windows — creates the versioned Windows zip
@@ -68,7 +68,7 @@ For a signed and notarized macOS release candidate, pass the DMG to include the
 artifact integrity, Gatekeeper, stapling, bundle-signature, and version gates:
 
 ```bash
-scripts/validate_release.sh dist/VideoMasa-3.1.1.dmg
+scripts/validate_release.sh dist/VideoMasa-3.2.0.dmg
 ```
 
 The incremental backend modularization decision is documented in
@@ -99,10 +99,28 @@ Anything yt-dlp supports (1000+ sites): YouTube, TikTok, Instagram, X/Twitter, F
 Model and preference selections are remembered between sessions.
 
 For unusually long media, the desktop app allows 30 minutes for downloading and
-4 hours for Whisper transcription by default. Source media is retained after a
-transcription failure so the job can be retried without another upload. Advanced
-source users can override the limits with `VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS`
-and `VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS`.
+4 hours per Whisper process by default. Recordings of 20 minutes or longer are
+split into isolated 10-minute checkpoints. If a chunk fails, Resume skips the
+completed chunks and continues without another upload. Checkpoints are transient
+and are cleared when the app quits.
+
+Advanced source users can override these defaults with
+`VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS`,
+`VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS`,
+`VIDEOMASA_LONG_FORM_THRESHOLD_SECONDS`,
+`VIDEOMASA_LONG_FORM_CHUNK_SECONDS`, and
+`VIDEOMASA_LONG_FORM_PREPARATION_TIMEOUT_SECONDS`.
+
+The long-form design and trade-offs are documented in
+[`docs/architecture/ADR-002-checkpointed-long-form-transcription.md`](docs/architecture/ADR-002-checkpointed-long-form-transcription.md).
+
+## What's new in v3.2.0
+
+- **Checkpointed podcasts** — recordings of 20 minutes or longer are transcribed in isolated 10-minute chunks
+- **Resume completed work** — failed long-form jobs retain atomic checkpoints, and Resume skips chunks that already finished
+- **Visible long-form progress** — job cards show preparation, current chunk, saved-chunk count, percentage, and final timestamp reconstruction
+- **Original-timeline captions** — chunk-relative Whisper segments are merged back into one continuous transcript and CapCut-ready SRT
+- **Safe short-form compatibility** — recordings below the threshold continue through the proven single-pass 3.1.1 workflow
 
 ## What's new in v3.1.1
 
