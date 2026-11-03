@@ -45,6 +45,8 @@ Pre-built packages are available for macOS and Windows. Download the latest rele
 
 Both packages handle Python environment setup and dependency installation automatically on first launch. The desktop runtime includes a pinned, architecture-specific ffmpeg binary, so Homebrew is not required.
 
+On macOS, the app also keeps yt-dlp current, because sites change faster than app releases. When it opens, at most once a day, it checks PyPI in the background and installs any newer yt-dlp into `~/.videomasa/ytdlp`. Everything else stays at its locked version. If an update fails, the app keeps the yt-dlp it has, and `~/.videomasa/ytdlp-update.log` shows the latest result. To turn updates off, create a file at `~/.videomasa/no-ytdlp-update`. **Repair Installation** goes back to the locked yt-dlp.
+
 #### Building from source
 
 ```bash

@@ -23,6 +23,9 @@ TOKEN_FILE="$VM_HOME/server.token"
 LOG_FILE="$VM_HOME/server.log"
 VERSION_FILE="$VM_HOME/version"
 DIAGNOSTICS_FILE="$VM_HOME/diagnostics.txt"
+YTDLP_UPDATES_DIR="$VM_HOME/ytdlp"
+YTDLP_UPDATE_LOG="$VM_HOME/ytdlp-update.log"
+YTDLP_UPDATE_OPT_OUT="$VM_HOME/no-ytdlp-update"
 PORT="${VIDEOMASA_PORT:-8080}"
 READY_ATTEMPTS="${VIDEOMASA_READY_ATTEMPTS:-120}"
 
@@ -79,6 +82,14 @@ venv_is_healthy() {
         "$VENV_PYTHON" -c \
             'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
             >/dev/null 2>&1
+}
+
+# Runs beside the server so a slow or failed update never holds up the app.
+start_ytdlp_update() {
+    [ ! -e "$YTDLP_UPDATE_OPT_OUT" ] || return 0
+    (
+        cd "$APP_DIR" && exec "$VENV_PYTHON" -m videomasa.ytdlp_update "$YTDLP_UPDATES_DIR"
+    ) > "$YTDLP_UPDATE_LOG" 2>&1 < /dev/null &
 }
 
 launch_setup() {
@@ -195,7 +206,13 @@ if [ "$_needs_setup" = true ]; then
     exit 0
 fi
 
-export PATH="$RESOURCES_DIR:$VENV_DIR/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# An updated yt-dlp can outlive the Python it was built on. Without this link,
+# PATH falls through to the locked yt-dlp, and clearing the stamp rechecks right away.
+if [ -L "$YTDLP_UPDATES_DIR/bin/yt-dlp" ] && ! "$YTDLP_UPDATES_DIR/bin/yt-dlp" --version >/dev/null 2>&1; then
+    rm -f "$YTDLP_UPDATES_DIR/bin/yt-dlp" "$YTDLP_UPDATES_DIR/last-check"
+fi
+
+export PATH="$RESOURCES_DIR:$YTDLP_UPDATES_DIR/bin:$VENV_DIR/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export VIDEOMASA_WORK_DIR="$WORK_DIR"
 export VIDEOMASA_COOKIES_DIR="$COOKIES_DIR"
 export VIDEOMASA_OPEN_BROWSER="0"
@@ -228,6 +245,7 @@ _attempt=0
 while [ "$_attempt" -lt "$READY_ATTEMPTS" ]; do
     if server_is_ready; then
         open_app_url
+        start_ytdlp_update
         wait "$SERVER_PID" 2>/dev/null || true
         exit 0
     fi
