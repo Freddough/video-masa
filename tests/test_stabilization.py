@@ -511,6 +511,65 @@ class StabilizationTests(unittest.TestCase):
         finally:
             videomasa._last_heartbeat = old_heartbeat
 
+    def run_fake_download(self, job_id, stdout, do_transcribe=False, do_download=True, queued_download=None):
+        """Run run_job with yt-dlp faked; return the job and the sort orders it requested."""
+        sort_orders = []
+
+        def fake_ytdlp(cmd, **kwargs):
+            if "-j" in cmd:
+                formats = [{"height": height} for height in (2160, 1080, 360)]
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"formats": formats}), "")
+            if "-S" in cmd:
+                sort_orders.append(cmd[cmd.index("-S") + 1])
+                (videomasa.WORK_DIR / f"{job_id}_Clip.mp4").write_bytes(b"video")
+                return subprocess.CompletedProcess(cmd, 0, stdout, "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        job = {
+            "status": "queued",
+            "message": "Queued...",
+            "url": "https://example.com/watch",
+            "do_transcribe": do_transcribe,
+            "do_download": do_download if queued_download is None else queued_download,
+            "transcripts": {},
+            "available_formats": {"video": [], "audio": []},
+            "downloaded_quality": "Best",
+            "file_status": "absent",
+            "stage": "queued",
+            "retryable": False,
+        }
+        videomasa.jobs[job_id] = job
+        with (
+            patch("app.subprocess.run", side_effect=fake_ytdlp),
+            patch("app._transcribe_existing_file", return_value=True),
+        ):
+            videomasa.run_job(job_id, job["url"], "base", do_transcribe, do_download)
+        self.assertEqual(job["status"], "done", job["message"])
+        return job, sort_orders
+
+    def test_kept_download_requests_highest_h264_and_labels_saved_height(self) -> None:
+        job, sort_orders = self.run_fake_download("kept", "1080\n")
+        self.assertEqual(sort_orders, ["vcodec:h264,res,acodec:aac"])
+        self.assertEqual(job["downloaded_quality"], "1080p")
+        self.assertEqual(job["available_formats"]["video"], [2160, 1080, 360])
+
+    def test_transcribe_only_download_keeps_small_format_and_labels_saved_height(self) -> None:
+        job, sort_orders = self.run_fake_download(
+            "transcript-only", "360\n", do_transcribe=True, do_download=False,
+        )
+        self.assertEqual(sort_orders, ["vcodec:h264,acodec:aac"])
+        self.assertEqual(job["downloaded_quality"], "360p")
+
+    def test_download_added_while_queued_requests_highest_h264(self) -> None:
+        _, sort_orders = self.run_fake_download(
+            "merged", "1080\n", do_transcribe=True, do_download=False, queued_download=True,
+        )
+        self.assertEqual(sort_orders, ["vcodec:h264,res,acodec:aac"])
+
+    def test_download_without_saved_height_does_not_claim_probed_height(self) -> None:
+        job, _ = self.run_fake_download("no-height", "\n")
+        self.assertEqual(job["downloaded_quality"], "Best")
+
     def test_job_renderer_uses_dom_properties_without_inline_handlers(self) -> None:
         template = (Path(__file__).resolve().parents[1] / "templates" / "index.html").read_text()
         self.assertNotIn("cardBody.innerHTML", template)

@@ -640,14 +640,18 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         job["timeout_seconds"] = DOWNLOAD_TIMEOUT_SECONDS
         job["message"] = "Downloading video..."
 
-        # Download with yt-dlp — always best quality
+        # Kept files get the highest H.264 resolution so they open in any editor;
+        # larger sizes that only exist as VP9/AV1 stay in the quality menu.
+        # Transcripts only need the audio, so those jobs keep the small combined file.
+        format_sort = "vcodec:h264,res,acodec:aac" if job["do_download"] else "vcodec:h264,acodec:aac"
         out_template = str(WORK_DIR / f"{job_id}_%(title)s.%(ext)s")
         cmd = [
             "yt-dlp",
             "--no-playlist",
             "-o", out_template,
-            "-S", "vcodec:h264,acodec:aac",
+            "-S", format_sort,
             "--merge-output-format", "mp4",
+            "--print", "after_move:%(height|)s",
         ]
 
         cmd.extend(_cookie_args(cookies_browser))
@@ -691,10 +695,6 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         probe_thread.join(timeout=5)
         if probe_result[0]:
             job["available_formats"] = probe_result[0]
-            # Best quality = highest probed video height
-            video_heights = probe_result[0].get("video", [])
-            if video_heights:
-                job["downloaded_quality"] = f"{video_heights[0]}p"
 
         if result.returncode != 0:
             job["status"] = "error"
@@ -716,6 +716,11 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             print(f"[download error] job={job_id} rc={result.returncode}\n{stderr}", flush=True)
             check_queue_and_cleanup()
             return
+
+        # Label the job with the height yt-dlp actually saved
+        saved_height = (result.stdout or "").strip().rpartition("\n")[2]
+        if saved_height.isdigit():
+            job["downloaded_quality"] = f"{saved_height}p"
 
         # Find the downloaded file
         downloaded = None
