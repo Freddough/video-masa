@@ -66,17 +66,21 @@ echo "║     Video Masa — Setup / Repair            ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
+# Current yt-dlp releases need Python 3.11, and the locked torch release has no wheels
+# past 3.12. Try versioned names first because a plain python3 is often newer than that.
 find_python() {
     if [ -n "${VIDEOMASA_PYTHON:-}" ]; then
         _candidates=("$VIDEOMASA_PYTHON")
     else
-        _candidates=(
-            /opt/homebrew/bin/python3
-            /usr/local/bin/python3
-            /Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+        _candidates=()
+        for _bin_dir in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
+            _candidates+=("$_bin_dir/python3.12" "$_bin_dir/python3.11" "$_bin_dir/python3")
+        done
+        _candidates+=(
             /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
             /Library/Frameworks/Python.framework/Versions/3.11/bin/python3
-            /Library/Frameworks/Python.framework/Versions/3.10/bin/python3
+            python3.12
+            python3.11
             python3
             python
         )
@@ -85,25 +89,31 @@ find_python() {
     for candidate in "${_candidates[@]}"; do
         _resolved=$(command -v "$candidate" 2>/dev/null || true)
         [ -n "$_resolved" ] || continue
-        if "$_resolved" -c \
-            'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
-            >/dev/null 2>&1; then
-            echo "$_resolved"
-            return 0
-        fi
+        _version=$("$_resolved" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
+        case "$_version" in
+            3.11|3.12)
+                echo "$_resolved"
+                return 0
+                ;;
+        esac
     done
     return 1
 }
 
 PYTHON=$(find_python || true)
 
+if [ -z "$PYTHON" ] && [ -n "${VIDEOMASA_PYTHON:-}" ]; then
+    echo "ERROR: VIDEOMASA_PYTHON must be Python 3.11 or 3.12: $VIDEOMASA_PYTHON"
+    exit 1
+fi
+
 if [ -z "$PYTHON" ]; then
-    echo "Python 3.10+ not found. Installing it now..."
+    echo "Python 3.11 or 3.12 not found. Installing Python 3.12 now..."
     echo ""
 
     if command -v brew >/dev/null 2>&1; then
-        echo "Installing Python via Homebrew..."
-        brew install python
+        echo "Installing Python 3.12 via Homebrew..."
+        brew install python@3.12
     else
         PYTHON_VERSION="3.12.8"
         PKG_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-macos11.pkg"
@@ -128,11 +138,11 @@ if [ -z "$PYTHON" ]; then
         rm -f "$PKG_PATH"
     fi
 
-    export PATH="/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/Library/Frameworks/Python.framework/Versions/3.13/bin:$PATH"
+    export PATH="/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:$PATH"
     PYTHON=$(find_python || true)
 
     if [ -z "$PYTHON" ]; then
-        echo "ERROR: Python installation completed but Python 3.10+ was not found."
+        echo "ERROR: Python installation completed but Python 3.11 or 3.12 was not found."
         exit 1
     fi
 fi

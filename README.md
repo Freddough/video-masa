@@ -19,7 +19,7 @@ Paste any video link (YouTube, TikTok, Instagram, X, etc.), transcribe it, downl
 ### Option A: Run from source
 
 #### 1. Prerequisites
-- **Python 3.10+**
+- **Python 3.11 or 3.12** — current yt-dlp needs at least 3.11, and the pinned `torch` has no wheels past 3.12
 - **ffmpeg** — `brew install ffmpeg` (macOS) or [download](https://ffmpeg.org/download.html)
 
 #### 2. Install dependencies

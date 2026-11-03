@@ -235,7 +235,7 @@ class MacOSPackagingTests(unittest.TestCase):
                     ["-arm64", "/bin/bash", str(self.resources / script_name)],
                 )
 
-    def make_fake_base_python(self, fail_pip: bool) -> Path:
+    def make_fake_base_python(self, fail_pip: bool, version: str = "3.12") -> Path:
         fake_python = self.root / "fake-python"
         generated_python = self.root / "generated-venv-python"
         write_executable(
@@ -265,6 +265,7 @@ class MacOSPackagingTests(unittest.TestCase):
             f"""\
             #!/bin/bash
             if [ "${{1:-}}" = "-c" ]; then
+                echo {version}
                 exit 0
             fi
             if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "venv" ]; then
@@ -296,6 +297,28 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertEqual((self.state / "version").read_text(), "3.0\n")
         self.assertFalse(any(self.state.glob("venv.runtime-*")))
         self.assertFalse((self.state / "setup.lock").exists())
+
+    def test_setup_only_accepts_python_versions_its_dependencies_support(self) -> None:
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+        cases = (("3.10", False), ("3.11", True), ("3.12", True), ("3.13", False), ("3.15", False))
+        for version, supported in cases:
+            with self.subTest(version=version):
+                result = self.run_script(
+                    "setup.sh",
+                    VIDEOMASA_PYTHON=str(self.make_fake_base_python(fail_pip=False, version=version)),
+                    VIDEOMASA_SKIP_MODEL_DOWNLOAD="1",
+                    VIDEOMASA_FFMPEG=str(fake_bin / "ffmpeg"),
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                )
+                self.assertEqual(result.returncode == 0, supported, result.stdout + result.stderr)
+                if not supported:
+                    self.assertIn("VIDEOMASA_PYTHON must be", result.stdout)
+
+    def test_setup_installs_a_python_version_its_dependencies_support(self) -> None:
+        setup = (MACOS_DIR / "setup.sh").read_text()
+        self.assertIn("brew install python@3.12", setup)
+        self.assertNotIn("Versions/3.13", setup)
 
     def test_setup_atomically_replaces_and_preserves_broken_environment(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
