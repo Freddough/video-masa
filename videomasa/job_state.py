@@ -1,7 +1,10 @@
-"""Pure helpers for job lifecycle and user-facing timing state."""
+"""Pure helpers for job lifecycle and user-facing timing and error state."""
+
+import re
 
 
 TERMINAL_JOB_STATUSES = frozenset({"done", "error"})
+DOWNLOAD_ERROR_LIMIT = 400
 
 
 def has_active_jobs(job_values) -> bool:
@@ -15,6 +18,16 @@ def has_active_jobs(job_values) -> bool:
         ):
             return True
     return False
+
+
+def summarize_download_error(stderr) -> str:
+    """Return the failure from yt-dlp stderr, not the warnings printed before it."""
+    text = (stderr or "").strip()
+    if not text:
+        return "unknown error"
+    failure = re.search(r"^ERROR:.*", text, re.MULTILINE | re.DOTALL)
+    summary = failure.group(0) if failure else text[-DOWNLOAD_ERROR_LIMIT:].strip()
+    return summary[:DOWNLOAD_ERROR_LIMIT]
 
 
 def format_duration(seconds) -> str:

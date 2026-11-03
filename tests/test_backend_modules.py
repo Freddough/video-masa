@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from videomasa.config import int_from_env, read_app_version
 from videomasa.runtime import check_health
-from videomasa.job_state import format_duration, has_active_jobs
+from videomasa.job_state import format_duration, has_active_jobs, summarize_download_error
 from videomasa.security import (
     constant_time_token_match,
     cookie_path,
@@ -134,6 +134,40 @@ class JobStateTests(unittest.TestCase):
         self.assertEqual(format_duration(600), "10 minutes")
         self.assertEqual(format_duration(14_400), "4 hours")
         self.assertEqual(format_duration(3_661), "1h 1m")
+
+    def test_download_error_skips_warnings_that_precede_the_failure(self) -> None:
+        stderr = (
+            "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+            "         It is strongly recommended to always use the latest version.\n"
+            "         You installed yt-dlp with pip or using the wheel from PyPi; Use that to update.\n"
+            "         To suppress this warning, add --no-update to your command/config.\n"
+            "ERROR: [youtube] abc: This video is unavailable\n"
+        )
+        self.assertEqual(
+            summarize_download_error(stderr),
+            "ERROR: [youtube] abc: This video is unavailable",
+        )
+
+    def test_download_error_keeps_lines_after_the_failure(self) -> None:
+        stderr = "WARNING: slow\nERROR: [site] abc: Login required\n       Use --cookies-from-browser\n"
+        self.assertEqual(
+            summarize_download_error(stderr),
+            "ERROR: [site] abc: Login required\n       Use --cookies-from-browser",
+        )
+
+    def test_download_error_ignores_error_text_inside_warnings(self) -> None:
+        stderr = "WARNING: retrying after ERROR: HTTP 503\nERROR: [site] abc: Gave up\n"
+        self.assertEqual(summarize_download_error(stderr), "ERROR: [site] abc: Gave up")
+
+    def test_download_error_without_error_line_uses_end_of_output(self) -> None:
+        summary = summarize_download_error("noise " * 200 + "\nTraceback: boom\n")
+        self.assertTrue(summary.endswith("Traceback: boom"))
+        self.assertLessEqual(len(summary), 400)
+
+    def test_download_error_is_bounded_and_handles_empty_output(self) -> None:
+        self.assertEqual(len(summarize_download_error("ERROR: " + "x" * 1000)), 400)
+        self.assertEqual(summarize_download_error(""), "unknown error")
+        self.assertEqual(summarize_download_error(None), "unknown error")
 
 
 class TranscriptionExecutionTests(unittest.TestCase):
