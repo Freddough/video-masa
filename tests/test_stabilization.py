@@ -547,6 +547,8 @@ class StabilizationTests(unittest.TestCase):
                     "status": "queued",
                     "message": "Queued...",
                     "url": url,
+                    "do_transcribe": False,
+                    "do_download": True,
                     "transcripts": {},
                     "file_status": "absent",
                     "stage": "queued",
