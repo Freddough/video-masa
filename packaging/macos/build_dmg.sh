@@ -48,10 +48,12 @@ echo "  [+] Stub executable"
 # ─── Launcher and setup scripts ───
 cp "$SCRIPT_DIR/launcher.sh" "$APP_BUNDLE/Contents/Resources/"
 cp "$SCRIPT_DIR/setup.sh" "$APP_BUNDLE/Contents/Resources/"
+cp "$SCRIPT_DIR/uninstall.sh" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/VERSION" "$APP_BUNDLE/Contents/Resources/"
 chmod +x "$APP_BUNDLE/Contents/Resources/launcher.sh"
 chmod +x "$APP_BUNDLE/Contents/Resources/setup.sh"
-echo "  [+] launcher.sh + setup.sh + VERSION"
+chmod +x "$APP_BUNDLE/Contents/Resources/uninstall.sh"
+echo "  [+] launcher.sh + setup.sh + uninstall.sh + VERSION"
 
 # ─── Flask application ───
 cp "$PROJECT_DIR/app.py" "$APP_BUNDLE/Contents/Resources/app/"

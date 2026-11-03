@@ -98,6 +98,98 @@
             color: var(--red);
             background: #ff6b6b0a;
         }
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .storage-btn:hover {
+            border-color: var(--lime);
+            color: var(--lime);
+            background: var(--lime-glow);
+        }
+        .storage-modal {
+            display: none;
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: rgba(0, 0, 0, .65);
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+        }
+        .storage-modal.open { display: flex; }
+        .storage-card {
+            position: relative;
+            width: 100%;
+            max-width: 460px;
+            max-height: calc(100vh - 32px);
+            overflow-y: auto;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 24px;
+        }
+        .storage-close {
+            position: absolute;
+            top: 12px;
+            right: 14px;
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 20px;
+            cursor: pointer;
+        }
+        .storage-title {
+            font-size: 17px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .storage-note {
+            font-size: 13px;
+            color: var(--text-dim);
+            line-height: 1.5;
+        }
+        .storage-heading {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-mid);
+            margin: 18px 0 6px;
+        }
+        .storage-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            font-size: 13px;
+            color: var(--text);
+        }
+        .storage-row-end {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--text-mid);
+            white-space: nowrap;
+        }
+        .storage-action {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-xs);
+            padding: 4px 10px;
+            font-family: inherit;
+            font-size: 12px;
+            color: var(--text-mid);
+            cursor: pointer;
+        }
+        .storage-action:hover {
+            border-color: var(--red);
+            color: var(--red);
+        }
+        .storage-action:disabled {
+            opacity: .5;
+            cursor: default;
+        }
         .brand-tag {
             display: inline-flex;
             align-items: center;
@@ -1042,7 +1134,10 @@
                 <div class="brand-dot"></div>
                 <div class="brand-name">Video Masa</div>
             </div>
-            <button class="quit-btn" id="quitBtn">Quit</button>
+            <div class="header-actions">
+                <button class="quit-btn storage-btn" id="storageBtn">Storage</button>
+                <button class="quit-btn" id="quitBtn">Quit</button>
+            </div>
         </div>
 
         <!-- Main Input Card -->
@@ -1128,6 +1223,15 @@
         </div>
 
         <div class="footer">Runs locally via <span>Whisper</span> + <span>yt-dlp</span> — your data never leaves your machine</div>
+    </div>
+
+    <!-- Storage panel -->
+    <div id="storageModal" class="storage-modal">
+        <div class="storage-card">
+            <button id="storageClose" class="storage-close" aria-label="Close">&times;</button>
+            <h3 class="storage-title">Storage</h3>
+            <div id="storageBody"></div>
+        </div>
     </div>
 
     <!-- Cookie info modal -->
@@ -1936,9 +2040,14 @@
             link.remove();
         }
 
+        function isFinished(job) {
+            const finished = job.status === 'done' || job.status === 'error';
+            return finished && !Object.values(job.transcripts || {}).some(t => t.status === 'transcribing');
+        }
+
         function clearDone() {
-            const removed = jobQueue.filter(j => j.status === 'done' || j.status === 'error');
-            jobQueue = jobQueue.filter(j => j.status !== 'done' && j.status !== 'error');
+            const removed = jobQueue.filter(isFinished);
+            jobQueue = jobQueue.filter(j => !isFinished(j));
             // Clean up server files for cleared jobs
             removed.forEach(j => {
                 if (j.fileStatus !== 'cleaned') {
@@ -2079,6 +2188,133 @@
         // Send first heartbeat immediately
         fetch('/heartbeat', { method: 'POST' }).catch(() => {});
 
+        // ─── Restore jobs after the tab was closed or reloaded ───
+        async function restoreJobs() {
+            try {
+                const resp = await fetch('/jobs');
+                const data = await resp.json();
+                (data.jobs || []).forEach(saved => {
+                    if (jobQueue.some(j => j.id === saved.id)) return;
+                    const job = {
+                        id: saved.id, label: saved.title || saved.filename || makeLabel(saved.url || ''), url: saved.url || '',
+                        doTranscribe: !!saved.do_transcribe, doDownload: !!saved.do_download,
+                        status: 'queued', message: 'Restoring...', retryable: false,
+                        resumeAvailable: false, progress: null,
+                        transcript: '', timestamped: '',
+                        downloadReady: false, filename: saved.filename || '',
+                        title: saved.title || '', thumbnail: '', merged: false,
+                        showTimestamped: {},
+                        model: saved.model || 'base', availableFormats: {video: [], audio: []}, downloadedQuality: '',
+                        transcripts: {}, activeTab: saved.model || 'base'
+                    };
+                    jobQueue.push(job);
+                    pollJob(job);
+                });
+                if (jobQueue.length) renderQueue();
+            } catch (e) {}
+        }
+        restoreJobs();
+
+        // ─── Storage panel ───
+        function closeStoragePanel() {
+            document.getElementById('storageModal').classList.remove('open');
+        }
+
+        function makeStorageRow(label, end) {
+            const row = makeEl('div', 'storage-row');
+            const value = makeEl('div', 'storage-row-end');
+            value.append(...end);
+            row.append(makeEl('span', '', label), value);
+            return row;
+        }
+
+        async function removeSpeechModel(model) {
+            if (!confirm(`Remove the ${model} speech model? It downloads again the next time you use it.`)) return;
+            const resp = await fetch('/storage/remove-model', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model })
+            });
+            const data = await resp.json();
+            if (data.error) alert(data.error);
+            renderStoragePanel();
+        }
+
+        async function uninstallApp() {
+            const warning = 'Uninstall Video Masa?\n\nThis removes the app, its downloaded files, saved cookies, and its speech models. Files you already saved stay where they are.';
+            if (!confirm(warning)) return;
+            const resp = await fetch('/uninstall', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ confirm: true })
+            });
+            const data = await resp.json();
+            if (data.error) { alert(data.error); return; }
+            const done = makeEl('div', '', 'Video Masa was uninstalled. If its icon is still in your Dock, right-click it and choose Options, then Remove from Dock. You can close this tab.');
+            done.style.cssText = 'display:flex;align-items:center;justify-content:center;height:100vh;padding:24px;text-align:center;color:#a0a0b8;font-size:14px;';
+            document.body.replaceChildren(done);
+        }
+
+        async function renderStoragePanel() {
+            const body = document.getElementById('storageBody');
+            body.replaceChildren(makeEl('p', 'storage-note', 'Measuring...'));
+            try {
+                const resp = await fetch('/storage');
+                const data = await resp.json();
+                const sections = [makeEl('p', 'storage-note', `Using ${data.total}. Your disk has ${data.free} free.`)];
+                sections.push(makeEl('div', 'storage-heading', 'App files'));
+                data.items.forEach(item => sections.push(makeStorageRow(item.label, [item.size])));
+
+                sections.push(makeEl('div', 'storage-heading', 'Speech models'));
+                if (!data.models.length) sections.push(makeEl('p', 'storage-note', 'None downloaded yet.'));
+                data.models.forEach(model => {
+                    const remove = makeEl('button', 'storage-action', 'Remove');
+                    remove.type = 'button';
+                    remove.addEventListener('click', () => removeSpeechModel(model.name));
+                    sections.push(makeStorageRow(model.name, [model.size, remove]));
+                });
+
+                if (data.uninstall_available) {
+                    sections.push(makeEl('div', 'storage-heading', 'Uninstall'));
+                    const uninstall = makeEl('button', 'storage-action', 'Uninstall Video Masa');
+                    uninstall.type = 'button';
+                    uninstall.addEventListener('click', uninstallApp);
+                    sections.push(makeEl('p', 'storage-note', 'Removes the app and everything it stored on this computer.'), uninstall);
+                }
+                body.replaceChildren(...sections);
+            } catch (e) {
+                body.replaceChildren(makeEl('p', 'storage-note', 'Could not read storage details.'));
+            }
+        }
+
+        document.getElementById('storageBtn').addEventListener('click', () => {
+            document.getElementById('storageModal').classList.add('open');
+            renderStoragePanel();
+        });
+        document.getElementById('storageClose').addEventListener('click', closeStoragePanel);
+        document.getElementById('storageModal').addEventListener('click', e => {
+            if (e.target.id === 'storageModal') closeStoragePanel();
+        });
+
+        // ─── yt-dlp freshness — checked after this launch's update has had time to finish ───
+        async function checkYtdlpFreshness() {
+            try {
+                const resp = await fetch('/ytdlp-status');
+                const status = await resp.json();
+                if (!status.stale) return;
+                const banner = makeEl('div');
+                banner.id = 'ytdlpBanner';
+                banner.style.cssText = 'background:#2a1a00;border:1px solid #664400;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#ffcc00;line-height:1.5;';
+                const reason = status.updates_off
+                    ? 'Automatic updates are turned off.'
+                    : (status.last_error ? `It couldn't update itself: ${status.last_error}` : "It hasn't been able to check for updates recently.");
+                banner.textContent = `yt-dlp is ${status.age_days} days old, so some downloads may fail. ${reason}`;
+                const main = document.querySelector('.main-card') || document.querySelector('.container') || document.body;
+                main.parentNode.insertBefore(banner, main);
+            } catch (e) {}
+        }
+        setTimeout(checkYtdlpFreshness, 60000);
+
         // ─── Health check — warn user about missing dependencies ───
         fetch('/health').then(r => r.json()).then(h => {
             if (h.all_ok) return;
@@ -2113,7 +2349,7 @@
                     <div style="font-size:36px;margin-bottom:16px;">⌘</div>
                     <h2 style="color:var(--lime);font-size:18px;font-weight:600;margin:0 0 12px;">Video Masa closed</h2>
                     <p style="color:var(--text-mid);font-size:14px;line-height:1.6;margin:0 0 20px;">
-                        The app shut down after 5 minutes of inactivity.<br>
+                        The app shut down after a period of inactivity.<br>
                         Downloaded files have been cleaned up to save space.
                     </p>
                     <p style="color:var(--text-dim);font-size:12px;margin:0;">

@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import socket
@@ -51,6 +52,8 @@ class MacOSPackagingTests(unittest.TestCase):
             {
                 "VIDEOMASA_HOME": str(self.state),
                 "VIDEOMASA_SKIP_RELAUNCH": "1",
+                # Never let a test show a real dialog or open a real Terminal window.
+                "VIDEOMASA_OSASCRIPT_BIN": "/usr/bin/true",
                 **extra_env,
             }
         )
@@ -393,6 +396,7 @@ class MacOSPackagingTests(unittest.TestCase):
                 exit 0
             fi
             printf '%s' "$PATH" > {str(path_log)!r}
+            printf '%s\\n' "$VIDEOMASA_HOME" "$VIDEOMASA_RESOURCES_DIR" "$VIDEOMASA_YTDLP_UPDATES_DIR" > {str(self.root / "server-env.txt")!r}
             exec {sys.executable!r} {str(server_helper)!r}
             """
         )
@@ -432,6 +436,10 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertLess(
             path_parts.index(str(self.state / "ytdlp" / "bin")),
             path_parts.index(str(self.state / "venv" / "bin")),
+        )
+        self.assertEqual(
+            (self.root / "server-env.txt").read_text().splitlines(),
+            [str(self.state), str(self.resources), str(self.state / "ytdlp")],
         )
 
     def test_launcher_skips_ytdlp_update_when_opted_out(self) -> None:
@@ -478,6 +486,239 @@ class MacOSPackagingTests(unittest.TestCase):
                     PATH=f"{fake_bin}:{os.environ['PATH']}",
                 )
                 self.assertEqual(updated.exists(), should_remain)
+
+    def locked_packages_hash(self) -> str:
+        lock_file = self.resources / "app" / "requirements.lock.txt"
+        return hashlib.sha256(lock_file.read_bytes()).hexdigest()
+
+    def launcher_opens_setup(self) -> bool:
+        osascript_log = self.root / "osascript-args.txt"
+        osascript_log.unlink(missing_ok=True)
+        fake_osascript = self.root / "fake-osascript"
+        write_executable(fake_osascript, f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {str(osascript_log)!r}\n")
+        fake_open = self.root / "fake-open"
+        write_executable(fake_open, f"#!/bin/bash\nkill \"$(cat {str(self.state / 'server.pid')!r})\"\n")
+        result = self.run_script(
+            "launcher.sh",
+            VIDEOMASA_PORT=str(free_port()),
+            VIDEOMASA_OPEN_BIN=str(fake_open),
+            VIDEOMASA_OSASCRIPT_BIN=str(fake_osascript),
+            VIDEOMASA_READY_ATTEMPTS="40",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return osascript_log.exists()
+
+    def make_runnable_venv(self) -> None:
+        server_helper = self.write_health_server()
+        self.make_healthy_venv(
+            f"""\
+            #!/bin/bash
+            if [ "${{1:-}}" = "-c" ] || [ "${{1:-}}" = "-m" ]; then
+                exit 0
+            fi
+            exec {sys.executable!r} {str(server_helper)!r}
+            """
+        )
+
+    def test_app_upgrade_only_rebuilds_when_locked_packages_change(self) -> None:
+        self.make_runnable_venv()
+        hash_file = self.state / "lock-hash"
+        hash_file.write_text(f"{self.locked_packages_hash()}\n")
+
+        (self.state / "version").write_text("1.0.0\n")
+        self.assertFalse(self.launcher_opens_setup(), "same locked packages must not rebuild")
+
+        with open(self.resources / "app" / "requirements.lock.txt", "a") as lock_file:
+            lock_file.write("# changed\n")
+        self.assertTrue(self.launcher_opens_setup(), "changed locked packages must rebuild")
+
+    def test_older_install_keeps_version_check_until_it_records_a_hash(self) -> None:
+        self.make_runnable_venv()
+        hash_file = self.state / "lock-hash"
+
+        (self.state / "version").write_text("1.0.0\n")
+        self.assertTrue(self.launcher_opens_setup())
+        self.assertFalse(hash_file.exists())
+
+        (self.state / "version").write_text("3.2.0\n")
+        self.assertFalse(self.launcher_opens_setup())
+        self.assertEqual(hash_file.read_text().strip(), self.locked_packages_hash())
+
+    def test_setup_records_the_lock_hash_and_skips_pips_cache(self) -> None:
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+        result = self.run_script(
+            "setup.sh",
+            VIDEOMASA_PYTHON=str(self.make_fake_base_python(fail_pip=False)),
+            VIDEOMASA_SKIP_MODEL_DOWNLOAD="1",
+            VIDEOMASA_FFMPEG=str(fake_bin / "ffmpeg"),
+            PATH=f"{fake_bin}:{os.environ['PATH']}",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.state / "lock-hash").read_text().strip(), self.locked_packages_hash())
+
+        pip_lines = [
+            line for line in (MACOS_DIR / "setup.sh").read_text().splitlines()
+            if "-m pip install" in line
+        ]
+        self.assertEqual(len(pip_lines), 2)
+        for line in pip_lines:
+            self.assertIn("--no-cache-dir", line)
+
+    def wait_for_old_environments_to_go(self) -> list:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            leftovers = sorted(path.name for path in self.state.glob("venv.*"))
+            if len(leftovers) <= 1:
+                return leftovers
+            time.sleep(0.05)
+        return sorted(path.name for path in self.state.glob("venv.*"))
+
+    def test_launcher_removes_old_environments_once_the_app_is_ready(self) -> None:
+        self.make_runnable_venv()
+        real_venv = self.state / "venv"
+        current = self.state / "venv.runtime-current"
+        real_venv.rename(current)
+        real_venv.symlink_to(current.name)
+        for name in ("venv.runtime-old", "venv.broken-old"):
+            (self.state / name / "bin").mkdir(parents=True)
+        (self.state / "venv.previous-old").symlink_to("venv.runtime-old")
+        unrelated = self.state / "venvs-notes.txt"
+        unrelated.write_text("keep")
+
+        self.assertFalse(self.launcher_opens_setup())
+
+        self.assertEqual(self.wait_for_old_environments_to_go(), ["venv.runtime-current"])
+        self.assertTrue((self.state / "venv" / "bin" / "python").exists())
+        self.assertTrue(unrelated.exists())
+
+    def test_old_environments_stay_while_a_repair_is_running(self) -> None:
+        self.make_runnable_venv()
+        old = self.state / "venv.runtime-being-built"
+        old.mkdir()
+        (self.state / "setup.lock").mkdir()
+
+        self.assertFalse(self.launcher_opens_setup())
+        time.sleep(0.5)
+
+        self.assertTrue(old.exists())
+
+    def run_uninstall(self, home: Path, pid: str = "999999") -> subprocess.CompletedProcess:
+        script = self.resources / "uninstall.sh"
+        shutil.copy2(MACOS_DIR / "uninstall.sh", script)
+        self.trash_log = self.root / "trash.txt"
+        fake_trash = self.root / "fake-trash"
+        write_executable(fake_trash, f"#!/bin/bash\nprintf '%s\\n' \"$1\" > {str(self.trash_log)!r}\n")
+        return subprocess.run(
+            ["/bin/bash", str(script), pid, str(home), str(self.root / "whisper")],
+            env={**os.environ, "VIDEOMASA_TRASH_BIN": str(fake_trash)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_uninstall_removes_app_data_this_apps_models_and_the_app(self) -> None:
+        home = self.root / ".videomasa"
+        (home / "cookies").mkdir(parents=True)
+        (home / "cookies" / "session.txt").write_text("secret")
+        models = self.root / "whisper"
+        models.mkdir()
+        (models / "base.pt").write_text("model")
+        (models / "large-v3.pt").write_text("another tool's model")
+
+        result = self.run_uninstall(home)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(home.exists())
+        self.assertEqual([path.name for path in models.iterdir()], ["large-v3.pt"])
+        self.assertEqual(
+            os.path.realpath(self.trash_log.read_text().strip()),
+            os.path.realpath(self.root / "Video Masa's Test.app"),
+        )
+
+    def test_uninstall_removes_an_empty_model_folder(self) -> None:
+        home = self.root / ".videomasa"
+        home.mkdir()
+        models = self.root / "whisper"
+        models.mkdir()
+        (models / "tiny.pt").write_text("model")
+
+        self.run_uninstall(home)
+
+        self.assertFalse(models.exists())
+
+    def test_uninstall_refuses_an_unexpected_folder(self) -> None:
+        other = self.root / "documents"
+        other.mkdir()
+        (other / "thesis.txt").write_text("keep")
+
+        result = self.run_uninstall(other)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue((other / "thesis.txt").exists())
+        self.assertFalse(self.trash_log.exists())
+
+    def test_uninstall_leaves_everything_if_the_app_will_not_stop(self) -> None:
+        home = self.root / ".videomasa"
+        home.mkdir()
+        script_body = (MACOS_DIR / "uninstall.sh").read_text().replace('-lt 120', '-lt 2')
+        script = self.resources / "uninstall.sh"
+        script.write_text(script_body)
+        result = subprocess.run(
+            ["/bin/bash", str(script), str(os.getpid()), str(home), str(self.root / "whisper")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(home.exists())
+
+    def test_build_packages_the_uninstall_script(self) -> None:
+        build = (MACOS_DIR / "build_dmg.sh").read_text()
+        self.assertIn('cp "$SCRIPT_DIR/uninstall.sh"', build)
+
+    def test_storage_stays_flat_across_years_of_app_upgrades(self) -> None:
+        """Ten rebuilds with 1 MB environments must leave about one environment on disk."""
+        budget_bytes = 1_500_000
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+        server_helper = self.write_health_server()
+        fake_python = self.make_fake_base_python(fail_pip=False)
+        lock_file = self.resources / "app" / "requirements.lock.txt"
+
+        for upgrade in range(10):
+            with open(lock_file, "a") as lock:
+                lock.write(f"# upgrade {upgrade}\n")
+            result = self.run_script(
+                "setup.sh",
+                VIDEOMASA_PYTHON=str(fake_python),
+                VIDEOMASA_SKIP_MODEL_DOWNLOAD="1",
+                VIDEOMASA_FFMPEG=str(fake_bin / "ffmpeg"),
+                PATH=f"{fake_bin}:{os.environ['PATH']}",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            environment = self.state / "venv"
+            (environment / "packages.bin").write_bytes(b"x" * 1_000_000)
+            write_executable(
+                environment / "bin" / "python",
+                f"""\
+                #!/bin/bash
+                if [ "${{1:-}}" = "-c" ] || [ "${{1:-}}" = "-m" ]; then
+                    exit 0
+                fi
+                exec {sys.executable!r} {str(server_helper)!r}
+                """,
+            )
+            self.assertFalse(self.launcher_opens_setup(), f"upgrade {upgrade} should already be built")
+            self.wait_for_old_environments_to_go()
+
+        used = sum(
+            path.stat().st_size for path in self.state.rglob("*") if path.is_file() and not path.is_symlink()
+        )
+        self.assertLess(used, budget_bytes)
+        self.assertEqual(len(list(self.state.glob("venv.runtime-*"))), 1)
+        self.assertEqual(list(self.state.glob("venv.previous-*")), [])
 
 
 if __name__ == "__main__":

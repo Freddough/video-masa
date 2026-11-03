@@ -45,7 +45,15 @@ Pre-built packages are available for macOS and Windows. Download the latest rele
 
 Both packages handle Python environment setup and dependency installation automatically on first launch. The desktop runtime includes a pinned, architecture-specific ffmpeg binary, so Homebrew is not required.
 
-On macOS, the app also keeps yt-dlp current, because sites change faster than app releases. When it opens, at most once a day, it checks PyPI in the background and installs any newer yt-dlp into `~/.videomasa/ytdlp`. Everything else stays at its locked version. If an update fails, the app keeps the yt-dlp it has, and `~/.videomasa/ytdlp-update.log` shows the latest result. To turn updates off, create a file at `~/.videomasa/no-ytdlp-update`. **Repair Installation** goes back to the locked yt-dlp.
+On macOS, the app also keeps yt-dlp current, because sites change faster than app releases. When it opens, at most once a day, it checks PyPI in the background and installs the newest release that has been out for at least 2 days into `~/.videomasa/ytdlp`. Everything else stays at its locked version. If an update fails, the app keeps the yt-dlp it has, and `~/.videomasa/ytdlp-update.log` shows the latest result. If a download fails on an updated copy, it retries once with the locked one. To turn updates off, create a file at `~/.videomasa/no-ytdlp-update`. **Repair Installation** goes back to the locked yt-dlp.
+
+#### Storage and uninstalling
+
+The app keeps its footprint flat over time. It removes each job's files, including partial downloads, once they are no longer needed, removes old environments after a new one starts successfully, and only rebuilds its environment when the locked packages change. It won't start a download with less than 2 GB free (`VIDEOMASA_MIN_FREE_MB` changes this).
+
+If you close the tab while a finished file or transcript hasn't been saved, or a failed transcription can still resume, the app keeps running for up to 24 hours so you can reopen it and pick up where you left off. Otherwise it stops 5 minutes after the tab closes.
+
+Use **Storage** at the top of the app to see what it occupies and remove speech models you no longer need. **Uninstall Video Masa** there removes the app, `~/.videomasa` (including saved cookies), and its speech models. To do this by hand, delete the app, `~/.videomasa`, and the `tiny.pt`, `base.pt`, `small.pt` and `medium.pt` files in `~/.cache/whisper`.
 
 #### Building from source
 

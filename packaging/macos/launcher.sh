@@ -22,6 +22,8 @@ PID_FILE="$VM_HOME/server.pid"
 TOKEN_FILE="$VM_HOME/server.token"
 LOG_FILE="$VM_HOME/server.log"
 VERSION_FILE="$VM_HOME/version"
+LOCK_HASH_FILE="$VM_HOME/lock-hash"
+SETUP_LOCK_DIR="$VM_HOME/setup.lock"
 DIAGNOSTICS_FILE="$VM_HOME/diagnostics.txt"
 YTDLP_UPDATES_DIR="$VM_HOME/ytdlp"
 YTDLP_UPDATE_LOG="$VM_HOME/ytdlp-update.log"
@@ -82,6 +84,18 @@ venv_is_healthy() {
         "$VENV_PYTHON" -c \
             'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' \
             >/dev/null 2>&1
+}
+
+# The current environment just served the app, so older ones are no longer needed
+# to roll back to. A repair running right now may be building the next one.
+remove_old_environments() {
+    [ ! -e "$SETUP_LOCK_DIR" ] || return 0
+    _current_environment=$(basename "$(/usr/bin/readlink "$VENV_DIR" 2>/dev/null || true)")
+    for _environment in "$VM_HOME"/venv.previous-* "$VM_HOME"/venv.broken-* "$VM_HOME"/venv.runtime-*; do
+        [ -e "$_environment" ] || [ -L "$_environment" ] || continue
+        [ "$(basename "$_environment")" != "$_current_environment" ] || continue
+        rm -rf "$_environment"
+    done
 }
 
 # Runs beside the server so a slow or failed update never holds up the app.
@@ -157,7 +171,7 @@ APPLESCRIPT
 
     case "$_action" in
         "Repair Installation")
-            rm -f "$VERSION_FILE" "$PID_FILE"
+            rm -f "$VERSION_FILE" "$LOCK_HASH_FILE" "$PID_FILE"
             launch_setup
             ;;
         "Open Log")
@@ -190,13 +204,24 @@ if [ -f "$PID_FILE" ]; then
     rm -f "$PID_FILE" "$TOKEN_FILE"
 fi
 
+# An app update only rebuilds the environment if its locked packages changed.
 _needs_setup=false
 if ! venv_is_healthy; then
     _needs_setup=true
 else
-    _installed_version=""
-    [ -f "$VERSION_FILE" ] && _installed_version=$(tr -d '[:space:]' < "$VERSION_FILE")
-    if [ "$_installed_version" != "$APP_VERSION" ]; then
+    _lock_hash=$(/usr/bin/shasum -a 256 "$APP_DIR/requirements.lock.txt" 2>/dev/null | /usr/bin/cut -d' ' -f1)
+    _installed_hash=""
+    [ -f "$LOCK_HASH_FILE" ] && _installed_hash=$(tr -d '[:space:]' < "$LOCK_HASH_FILE")
+    if [ -z "$_installed_hash" ]; then
+        # Installs from before this check only recorded the app version.
+        _installed_version=""
+        [ -f "$VERSION_FILE" ] && _installed_version=$(tr -d '[:space:]' < "$VERSION_FILE")
+        if [ "$_installed_version" != "$APP_VERSION" ]; then
+            _needs_setup=true
+        elif [ -n "$_lock_hash" ]; then
+            printf '%s\n' "$_lock_hash" > "$LOCK_HASH_FILE"
+        fi
+    elif [ "$_installed_hash" != "$_lock_hash" ]; then
         _needs_setup=true
     fi
 fi
@@ -213,6 +238,9 @@ if [ -L "$YTDLP_UPDATES_DIR/bin/yt-dlp" ] && ! "$YTDLP_UPDATES_DIR/bin/yt-dlp" -
 fi
 
 export PATH="$RESOURCES_DIR:$YTDLP_UPDATES_DIR/bin:$VENV_DIR/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export VIDEOMASA_HOME="$VM_HOME"
+export VIDEOMASA_RESOURCES_DIR="$RESOURCES_DIR"
+export VIDEOMASA_YTDLP_UPDATES_DIR="$YTDLP_UPDATES_DIR"
 export VIDEOMASA_WORK_DIR="$WORK_DIR"
 export VIDEOMASA_COOKIES_DIR="$COOKIES_DIR"
 export VIDEOMASA_OPEN_BROWSER="0"
@@ -246,6 +274,7 @@ while [ "$_attempt" -lt "$READY_ATTEMPTS" ]; do
     if server_is_ready; then
         open_app_url
         start_ytdlp_update
+        remove_old_environments > /dev/null 2>&1 < /dev/null &
         wait "$SERVER_PID" 2>/dev/null || true
         exit 0
     fi

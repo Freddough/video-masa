@@ -2,10 +2,17 @@
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+
+YTDLP_STALE_DAYS = 60
+YTDLP_CHECK_OVERDUE_DAYS = 7
 
 
 def find_ffmpeg(source_file: str | Path) -> str:
@@ -39,6 +46,58 @@ def prepend_executable_directory(executable: str) -> None:
     path_parts = os.environ.get("PATH", "").split(os.pathsep)
     if executable_dir not in path_parts:
         os.environ["PATH"] = executable_dir + os.pathsep + os.environ.get("PATH", "")
+
+
+def locked_ytdlp_fallback(python_executable: str | None = None) -> str | None:
+    """Return the environment's own yt-dlp when PATH currently prefers an updated copy."""
+    locked = Path(python_executable or sys.executable).parent / "yt-dlp"
+    active = shutil.which("yt-dlp")
+    if not active or not locked.exists():
+        return None
+    return str(locked) if Path(active).resolve() != locked.resolve() else None
+
+
+def ytdlp_freshness(updates_dir: str | Path | None, now: float | None = None) -> dict:
+    """Report whether self-updating has stalled.
+
+    Age alone proves nothing, because yt-dlp can go over 80 days between releases
+    while fully up to date, so an old version also needs failing or overdue checks.
+    """
+    if not updates_dir:
+        return {"stale": False}
+    ytdlp = shutil.which("yt-dlp")
+    if not ytdlp:
+        return {"stale": False}
+    try:
+        version = subprocess.run(
+            [ytdlp, "--version"], capture_output=True, text=True, timeout=30
+        ).stdout.strip()
+        match = re.match(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", version)
+        released = datetime(*(int(part) for part in match.groups())).timestamp() if match else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"stale": False}
+    if released is None:
+        return {"stale": False}
+
+    updates_dir = Path(updates_dir)
+    current_time = time.time() if now is None else now
+    age_days = int((current_time - released) // 86_400)
+    try:
+        last_error = (updates_dir / "last-error").read_text().strip()
+    except OSError:
+        last_error = ""
+    try:
+        check_age = current_time - (updates_dir / "last-check").stat().st_mtime
+        overdue = check_age > YTDLP_CHECK_OVERDUE_DAYS * 86_400
+    except OSError:
+        overdue = True
+    return {
+        "stale": age_days > YTDLP_STALE_DAYS and (bool(last_error) or overdue),
+        "version": version,
+        "age_days": age_days,
+        "last_error": last_error[:300],
+        "updates_off": (updates_dir.parent / "no-ytdlp-update").exists(),
+    }
 
 
 def check_health(ffmpeg_bin: str, python_executable: str | None = None) -> dict:
