@@ -6,4 +6,5 @@ numba==0.61.2
 numpy==1.26.4
 openai-whisper==20250625
 torch==2.2.2
-yt-dlp==2026.7.4
+yt-dlp==2026.10.26
+yt-dlp-ejs==0.8.0

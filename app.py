@@ -24,7 +24,7 @@ from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from videomasa.config import int_from_env, read_app_version
 from videomasa.runtime import check_health, find_ffmpeg, prepend_executable_directory
-from videomasa.job_state import format_duration, has_active_jobs
+from videomasa.job_state import format_duration, has_active_jobs, summarize_download_error
 from videomasa.security import (
     constant_time_token_match,
     cookie_path,
@@ -703,15 +703,17 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
             job["failure_code"] = "process_error"
             job["retryable"] = False
             stderr = result.stderr
+            error_summary = summarize_download_error(stderr)
             if _is_twitter_url(url):
                 if "No video could be found" in stderr or "Requested format is not available" in stderr:
                     job["message"] = "Twitter: Video requires login. Set 'Browser cookies' to your browser and retry."
                 elif "Failed to parse JSON" in stderr or "guest token" in stderr.lower():
                     job["message"] = "Twitter: API error. Try setting browser cookies, or update yt-dlp."
                 else:
-                    job["message"] = f"Twitter download failed: {stderr[:200]}"
+                    job["message"] = f"Twitter download failed: {error_summary}"
             else:
-                job["message"] = f"Download failed: {stderr[:200]}"
+                job["message"] = f"Download failed: {error_summary}"
+            print(f"[download error] job={job_id} rc={result.returncode}\n{stderr}", flush=True)
             check_queue_and_cleanup()
             return
 
@@ -1418,7 +1420,8 @@ def redownload(job_id):
 
             if result.returncode != 0:
                 new_job["status"] = "error"
-                new_job["message"] = f"Download failed: {result.stderr[:200]}"
+                new_job["message"] = f"Download failed: {summarize_download_error(result.stderr)}"
+                print(f"[download error] job={new_job_id} rc={result.returncode}\n{result.stderr}", flush=True)
                 check_queue_and_cleanup()
                 return
 

@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -522,6 +523,79 @@ class StabilizationTests(unittest.TestCase):
         self.assertIn("makeJobProgress(job)", template)
         self.assertIn("Resume transcription", template)
         self.assertIn("job.progress = data.progress || null", template)
+
+    @staticmethod
+    def ytdlp_failure(error: str) -> subprocess.CompletedProcess:
+        stderr = (
+            "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+            "         It is strongly recommended to always use the latest version.\n"
+            "         You installed yt-dlp with pip or using the wheel from PyPi; Use that to update.\n"
+            "         To suppress this warning, add --no-update to your command/config.\n"
+            f"{error}\n"
+        )
+        return subprocess.CompletedProcess(["yt-dlp"], 1, "", stderr)
+
+    def test_download_failure_reports_ytdlp_error_behind_warnings(self) -> None:
+        error = "ERROR: [generic] Unsupported URL"
+        cases = (
+            ("https://example.com/video", f"Download failed: {error}"),
+            ("https://x.com/user/status/1", f"Twitter download failed: {error}"),
+        )
+        for url, expected_message in cases:
+            with self.subTest(url=url):
+                videomasa.jobs["failed-download"] = {
+                    "status": "queued",
+                    "message": "Queued...",
+                    "url": url,
+                    "do_transcribe": False,
+                    "do_download": True,
+                    "transcripts": {},
+                    "file_status": "absent",
+                    "stage": "queued",
+                    "retryable": False,
+                }
+                output = io.StringIO()
+                with patch("app.subprocess.run", return_value=self.ytdlp_failure(error)):
+                    with contextlib.redirect_stdout(output):
+                        videomasa.run_job("failed-download", url, "base", False, True)
+
+                job = videomasa.jobs["failed-download"]
+                self.assertEqual(job["status"], "error")
+                self.assertEqual(job["failure_stage"], "download")
+                self.assertEqual(job["message"], expected_message)
+                self.assertIn("[download error] job=failed-download rc=1", output.getvalue())
+                self.assertIn("older than 90 days", output.getvalue())
+
+    def test_redownload_failure_reports_ytdlp_error_behind_warnings(self) -> None:
+        self.bootstrap()
+        videomasa.jobs["source"] = {
+            "status": "done",
+            "url": "https://example.com/video",
+            "title": "Clip",
+            "transcripts": {},
+        }
+
+        def run_immediately(function, *args):
+            function(*args)
+            return True
+
+        error = "ERROR: [generic] Unsupported URL"
+        output = io.StringIO()
+        with patch("app.subprocess.run", return_value=self.ytdlp_failure(error)):
+            with patch("app._submit_job", side_effect=run_immediately):
+                with contextlib.redirect_stdout(output):
+                    response = self.client.post(
+                        "/redownload/source",
+                        base_url=BASE_URL,
+                        json={"height": 720},
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        new_job_id = response.get_json()["new_job_id"]
+        job = videomasa.jobs[new_job_id]
+        self.assertEqual(job["status"], "error")
+        self.assertEqual(job["message"], f"Download failed: {error}")
+        self.assertIn(f"[download error] job={new_job_id} rc=1", output.getvalue())
 
 
 if __name__ == "__main__":
