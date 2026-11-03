@@ -858,6 +858,8 @@ class MacOSPackagingTests(unittest.TestCase):
             f"echo \"${{@: -1}}\" >> {str(calls)!r}\n"
             "while [ $# -gt 0 ]; do [ \"$1\" = \"--output\" ] && output=\"$2\"; shift; done\n"
             f"[ {exit_code} -eq 0 ] || exit {exit_code}\n"
+            # The launcher's health check also uses curl, with nothing to save.
+            "[ -n \"$output\" ] || exit 7\n"
             f"{copy}\n",
         )
         return curl, calls
