@@ -36,14 +36,17 @@ else
     echo "      Place an icon.icns file in packaging/macos/ to add a custom icon"
 fi
 
-# ─── Stub executable ───
-cat > "$APP_BUNDLE/Contents/MacOS/VideoMasa" << 'STUB'
-#!/bin/bash
-DIR="$(cd "$(dirname "$0")/.." && pwd)"
-exec bash "$DIR/Resources/launcher.sh"
-STUB
-chmod +x "$APP_BUNDLE/Contents/MacOS/VideoMasa"
-echo "  [+] Stub executable"
+# ─── Native app shell (Apple Silicon and Intel) ───
+SHELL_BUILD_DIR="$BUILD_DIR/app-shell"
+mkdir -p "$SHELL_BUILD_DIR"
+xcrun swiftc -O -swift-version 5 -target arm64-apple-macos11.0 \
+    -o "$SHELL_BUILD_DIR/VideoMasa-arm64" "$SCRIPT_DIR/VideoMasaApp.swift"
+xcrun swiftc -O -swift-version 5 -target x86_64-apple-macos10.15 \
+    -o "$SHELL_BUILD_DIR/VideoMasa-x86_64" "$SCRIPT_DIR/VideoMasaApp.swift"
+lipo -create -output "$APP_BUNDLE/Contents/MacOS/VideoMasa" \
+    "$SHELL_BUILD_DIR/VideoMasa-arm64" "$SHELL_BUILD_DIR/VideoMasa-x86_64"
+rm -rf "$SHELL_BUILD_DIR"
+echo "  [+] Native app shell"
 
 # ─── Launcher and setup scripts ───
 cp "$SCRIPT_DIR/launcher.sh" "$APP_BUNDLE/Contents/Resources/"
@@ -82,12 +85,13 @@ echo "Code signing with Developer ID..."
 
 # Sign embedded binaries first (inside-out)
 if [ -f "$APP_BUNDLE/Contents/Resources/ffmpeg" ]; then
-    codesign --force --options runtime --sign "$SIGN_ID" "$APP_BUNDLE/Contents/Resources/ffmpeg"
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP_BUNDLE/Contents/Resources/ffmpeg"
     echo "  [+] Signed ffmpeg"
 fi
 
 # Sign the app bundle
-codesign --force --deep --options runtime --sign "$SIGN_ID" "$APP_BUNDLE"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/VideoMasa"
+codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP_BUNDLE"
 echo "  [+] Signed app bundle"
 
 # Verify
@@ -198,7 +202,7 @@ rm -rf "$DMG_STAGING"
 
 # ─── Sign the DMG ───
 echo "Signing DMG..."
-codesign --force --sign "$SIGN_ID" "$DIST_DIR/$DMG_NAME"
+codesign --force --timestamp --sign "$SIGN_ID" "$DIST_DIR/$DMG_NAME"
 echo "  [+] DMG signed"
 
 # ─── Notarize ───
@@ -220,10 +224,13 @@ else
     echo "  [+] Notarization complete"
 fi
 
+# The release's stable download link needs a name that never changes.
+cp "$DIST_DIR/$DMG_NAME" "$DIST_DIR/VideoMasa.dmg"
+
 echo ""
 echo "════════════════════════════════════════════"
 echo "  Build complete! ($BUILD_STATUS)"
-echo "  DMG: dist/$DMG_NAME"
+echo "  DMG: dist/$DMG_NAME and dist/VideoMasa.dmg"
 echo "  App: build/macos/${APP_NAME}.app"
 echo "════════════════════════════════════════════"
 echo ""

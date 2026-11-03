@@ -18,6 +18,7 @@ echo "Validating Video Masa $APP_VERSION source..."
 "$PYTHON_BIN" -m py_compile app.py videomasa/*.py tests/*.py
 bash -n packaging/macos/build_dmg.sh packaging/macos/launcher.sh packaging/macos/setup.sh packaging/macos/uninstall.sh
 awk '/<script>/{capture=1; next} /<\/script>/{capture=0} capture' templates/index.html | node --check -
+xcrun swiftc -typecheck -swift-version 5 packaging/macos/VideoMasaApp.swift
 plutil -lint packaging/macos/Info.plist
 
 PLIST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' packaging/macos/Info.plist)

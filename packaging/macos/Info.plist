@@ -10,9 +10,13 @@
     <key>CFBundleIdentifier</key>
     <string>com.videomasa.app</string>
     <key>CFBundleVersion</key>
-    <string>3.2.0</string>
+    <string>3.3.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>3.2.0</string>
+    <string>3.3.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.video</string>
     <key>CFBundleExecutable</key>
     <string>VideoMasa</string>
     <key>CFBundleIconFile</key>

@@ -39,11 +39,11 @@ Open the authenticated local URL printed in the terminal.
 
 Pre-built packages are available for macOS and Windows. Download the latest release from the [Releases](../../releases) page.
 
-**macOS**: Download the `.dmg`, drag Video Masa to Applications, and double-click to run.
+**macOS**: [Download Video Masa](https://github.com/Freddough/video-masa/releases/latest/download/VideoMasa.dmg), open the file, and drag Video Masa to Applications. Open it from Applications and click **Open** when macOS asks. The first launch shows a setup window for a few minutes while it downloads what it needs (about 470 MB), so stay connected to the internet. It doesn't need Terminal, a password, Homebrew or a separate Python install.
 
 **Windows**: Download the `.zip`, extract, and run `launcher.bat`.
 
-Both packages handle Python environment setup and dependency installation automatically on first launch. The desktop runtime includes a pinned, architecture-specific ffmpeg binary, so Homebrew is not required.
+Both packages handle Python environment setup and dependency installation automatically on first launch. On macOS, the app installs its own private copy of Python in `~/.videomasa`, separate from any other Python on your computer. The desktop runtime includes a pinned, architecture-specific ffmpeg binary, so Homebrew is not required.
 
 On macOS, the app also keeps yt-dlp current, because sites change faster than app releases. When it opens, at most once a day, it checks PyPI in the background and installs the newest release that has been out for at least 2 days into `~/.videomasa/ytdlp`. Everything else stays at its locked version. If an update fails, the app keeps the yt-dlp it has, and `~/.videomasa/ytdlp-update.log` shows the latest result. If a download fails on an updated copy, it retries once with the locked one. To turn updates off, create a file at `~/.videomasa/no-ytdlp-update`. **Repair Installation** goes back to the locked yt-dlp.
 
@@ -58,7 +58,7 @@ Use **Storage** at the top of the app to see what it occupies and remove speech 
 #### Building from source
 
 ```bash
-# macOS — creates dist/VideoMasa-3.2.0.dmg
+# macOS — creates dist/VideoMasa-3.3.0.dmg and dist/VideoMasa.dmg
 bash packaging/macos/build_dmg.sh
 
 # Windows — creates the versioned Windows zip
@@ -78,7 +78,7 @@ For a signed and notarized macOS release candidate, pass the DMG to include the
 artifact integrity, Gatekeeper, stapling, bundle-signature, and version gates:
 
 ```bash
-scripts/validate_release.sh dist/VideoMasa-3.2.0.dmg
+scripts/validate_release.sh dist/VideoMasa-3.3.0.dmg
 ```
 
 The incremental backend modularization decision is documented in
@@ -123,6 +123,16 @@ Advanced source users can override these defaults with
 
 The long-form design and trade-offs are documented in
 [`docs/architecture/ADR-002-checkpointed-long-form-transcription.md`](docs/architecture/ADR-002-checkpointed-long-form-transcription.md).
+
+## What's new in v3.3.0
+
+- **Simple first launch on macOS** — setup runs in its own window without Terminal, a password, Homebrew or developer tools, using a private copy of Python
+- **Normal Dock behaviour** — click the Dock icon to reopen the page, or quit from the Dock
+- **Yt-dlp stays current** — it updates itself in the background, and falls back to the locked copy if a download fails
+- **Stays slim** — temporary files, old environments and caches no longer build up; a new **Storage** panel shows what's used and can uninstall the app
+- **Unsaved work is kept** — closing the tab no longer loses a finished file or transcript, and reopening the page restores your jobs
+- **Better downloads** — kept videos now download at the highest H.264 quality instead of 360p, and the quality badge shows what was saved
+- **New version notice** — the app tells you when a newer release is available
 
 ## What's new in v3.2.0
 

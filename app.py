@@ -37,6 +37,7 @@ from videomasa.job_state import (
     has_unsaved_work,
     summarize_download_error,
 )
+from videomasa.app_update import check_for_newer_release
 from videomasa.storage import (
     WHISPER_MODELS,
     claim_directory,
@@ -70,7 +71,7 @@ app = Flask(__name__)
 
 
 def _read_app_version():
-    return read_app_version(__file__, "3.2.0")
+    return read_app_version(__file__, "3.3.0")
 
 
 APP_VERSION = _read_app_version()
@@ -250,6 +251,7 @@ _HEARTBEAT_TIMEOUT = 300  # seconds (5 minutes)
 _UNSAVED_WORK_GRACE_SECONDS = 24 * 60 * 60
 _WATCHDOG_INTERVAL_SECONDS = 30
 _work_dir_lock = None
+_update_status = None
 
 
 def _find_whisper_json(source_path, job_id):
@@ -1662,7 +1664,13 @@ def _uninstall_script():
 
 @app.route("/storage")
 def storage():
-    report = storage_report(WORK_DIR, Path(sys.prefix).resolve(), YTDLP_UPDATES_DIR or None)
+    python_dir = Path(sys.base_prefix).resolve()
+    report = storage_report(
+        WORK_DIR,
+        Path(sys.prefix).resolve(),
+        YTDLP_UPDATES_DIR or None,
+        python_dir if APP_HOME and python_dir.is_relative_to(Path(APP_HOME).resolve()) else None,
+    )
     report["uninstall_available"] = _uninstall_script() is not None
     return jsonify(report)
 
@@ -1679,6 +1687,17 @@ def remove_model():
             return jsonify({"error": "Wait for running jobs to finish first"}), 409
     whisper_model_path(model).unlink(missing_ok=True)
     return jsonify({"ok": True})
+
+
+@app.route("/update-status")
+def update_status():
+    """Check for a newer release once per run. People running from source update with git."""
+    global _update_status
+    if not RESOURCES_DIR:
+        return jsonify({"available": False})
+    if _update_status is None:
+        _update_status = check_for_newer_release(APP_VERSION)
+    return jsonify(_update_status)
 
 
 @app.route("/ytdlp-status")

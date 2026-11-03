@@ -2315,6 +2315,25 @@
         }
         setTimeout(checkYtdlpFreshness, 60000);
 
+        // ─── New version notice ───
+        async function checkForAppUpdate() {
+            try {
+                const resp = await fetch('/update-status');
+                const update = await resp.json();
+                if (!update.available) return;
+                const banner = makeEl('div');
+                banner.id = 'updateBanner';
+                banner.style.cssText = 'background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:var(--text-mid);line-height:1.5;';
+                const link = makeEl('a', '', 'Download it');
+                link.href = update.url;
+                link.style.color = 'var(--lime)';
+                banner.append(`Video Masa ${update.version} is available. `, link, '. Quit this version first, then drag the new one to Applications and choose Replace.');
+                const main = document.querySelector('.main-card') || document.querySelector('.container') || document.body;
+                main.parentNode.insertBefore(banner, main);
+            } catch (e) {}
+        }
+        setTimeout(checkForAppUpdate, 5000);
+
         // ─── Health check — warn user about missing dependencies ───
         fetch('/health').then(r => r.json()).then(h => {
             if (h.all_ok) return;
