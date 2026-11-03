@@ -21,6 +21,7 @@ COOKIES_DIR="$VM_HOME/cookies"
 PID_FILE="$VM_HOME/server.pid"
 TOKEN_FILE="$VM_HOME/server.token"
 LOG_FILE="$VM_HOME/server.log"
+SETUP_LOG="$VM_HOME/setup.log"
 VERSION_FILE="$VM_HOME/version"
 LOCK_HASH_FILE="$VM_HOME/lock-hash"
 SETUP_LOCK_DIR="$VM_HOME/setup.lock"
@@ -29,19 +30,35 @@ YTDLP_UPDATES_DIR="$VM_HOME/ytdlp"
 YTDLP_UPDATE_LOG="$VM_HOME/ytdlp-update.log"
 YTDLP_UPDATE_OPT_OUT="$VM_HOME/no-ytdlp-update"
 PORT="${VIDEOMASA_PORT:-8080}"
-READY_ATTEMPTS="${VIDEOMASA_READY_ATTEMPTS:-120}"
+READY_ATTEMPTS="${VIDEOMASA_READY_ATTEMPTS:-240}"
+SYSTEM_PATH="${VIDEOMASA_SYSTEM_PATH:-/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 OPEN_BIN="${VIDEOMASA_OPEN_BIN:-/usr/bin/open}"
 OSASCRIPT_BIN="${VIDEOMASA_OSASCRIPT_BIN:-/usr/bin/osascript}"
 CURL_BIN="${VIDEOMASA_CURL_BIN:-/usr/bin/curl}"
 PBCOPY_BIN="${VIDEOMASA_PBCOPY_BIN:-/usr/bin/pbcopy}"
 API_TOKEN=""
+SERVER_PID=""
+SETUP_PID=""
+STOPPING=false
 
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.2.0"
+    APP_VERSION="3.3.0"
 fi
+
+# The app's window stops whatever is running when someone quits.
+stop_children() {
+    STOPPING=true
+    # Setup can't react until its current command ends, so stop that command too.
+    if [ -n "$SETUP_PID" ]; then
+        /usr/bin/pkill -TERM -P "$SETUP_PID" 2>/dev/null || true
+        kill "$SETUP_PID" 2>/dev/null || true
+    fi
+    [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true
+}
+trap stop_children TERM INT
 
 mkdir -p "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR"
 chmod 700 "$VM_HOME" "$WORK_DIR" "$COOKIES_DIR" 2>/dev/null || true
@@ -96,6 +113,16 @@ remove_old_environments() {
         [ "$(basename "$_environment")" != "$_current_environment" ] || continue
         rm -rf "$_environment"
     done
+
+    _current_python=$(basename "$(/usr/bin/readlink "$VM_HOME/python/current" 2>/dev/null || true)")
+    [ -n "$_current_python" ] || return 0
+    for _python in "$VM_HOME"/python/*; do
+        [ -d "$_python" ] || continue
+        case "$(basename "$_python")" in
+            current|"$_current_python") continue ;;
+        esac
+        rm -rf "$_python"
+    done
 }
 
 # Runs beside the server so a slow or failed update never holds up the app.
@@ -106,16 +133,15 @@ start_ytdlp_update() {
     ) > "$YTDLP_UPDATE_LOG" 2>&1 < /dev/null &
 }
 
-launch_setup() {
-    "$OSASCRIPT_BIN" - "$RESOURCES_DIR/setup.sh" <<'APPLESCRIPT'
-on run argv
-    set setupPath to item 1 of argv
-    tell application "Terminal"
-        activate
-        do script "/bin/bash " & quoted form of setupPath
-    end tell
-end run
-APPLESCRIPT
+# Runs without Terminal. Progress goes to the app's window on fd 3, details to a log.
+run_setup() {
+    VIDEOMASA_HOME="$VM_HOME" VIDEOMASA_SKIP_RELAUNCH=1 VIDEOMASA_STATUS_FD=3 \
+        /bin/bash "$RESOURCES_DIR/setup.sh" 3>&1 > "$SETUP_LOG" 2>&1 < /dev/null &
+    SETUP_PID=$!
+    wait "$SETUP_PID"
+    _setup_status=$?
+    SETUP_PID=""
+    return "$_setup_status"
 }
 
 write_diagnostics() {
@@ -172,7 +198,8 @@ APPLESCRIPT
     case "$_action" in
         "Repair Installation")
             rm -f "$VERSION_FILE" "$LOCK_HASH_FILE" "$PID_FILE"
-            launch_setup
+            trap - EXIT
+            exec /bin/bash "$RESOURCES_DIR/launcher.sh"
             ;;
         "Open Log")
             "$OPEN_BIN" "$LOG_FILE" >/dev/null 2>&1 || true
@@ -227,8 +254,12 @@ else
 fi
 
 if [ "$_needs_setup" = true ]; then
-    launch_setup
-    exit 0
+    echo "@@STATUS Getting started..."
+    if ! run_setup; then
+        [ "$STOPPING" = true ] && exit 1
+        echo "@@FAILED Please check your internet connection and try again."
+        exit 1
+    fi
 fi
 
 # An updated yt-dlp can outlive the Python it was built on. Without this link,
@@ -237,7 +268,7 @@ if [ -L "$YTDLP_UPDATES_DIR/bin/yt-dlp" ] && ! "$YTDLP_UPDATES_DIR/bin/yt-dlp" -
     rm -f "$YTDLP_UPDATES_DIR/bin/yt-dlp" "$YTDLP_UPDATES_DIR/last-check"
 fi
 
-export PATH="$RESOURCES_DIR:$YTDLP_UPDATES_DIR/bin:$VENV_DIR/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$RESOURCES_DIR:$YTDLP_UPDATES_DIR/bin:$VENV_DIR/bin:$SYSTEM_PATH"
 export VIDEOMASA_HOME="$VM_HOME"
 export VIDEOMASA_RESOURCES_DIR="$RESOURCES_DIR"
 export VIDEOMASA_YTDLP_UPDATES_DIR="$YTDLP_UPDATES_DIR"
@@ -260,9 +291,25 @@ chmod 600 "$LOG_FILE" 2>/dev/null || true
 "$VENV_PYTHON" "$APP_DIR/app.py" >> "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
+
+# If the app is force quit, the system adopts this script. Nothing is left to stop
+# the server then, and a later launch would have no Dock icon, so stop it here.
+_launcher_pid=$$
+(
+    while kill -0 "$SERVER_PID" 2>/dev/null; do
+        sleep 3
+        if [ "$(/bin/ps -o ppid= -p "$_launcher_pid" | tr -d ' ')" = "1" ]; then
+            kill "$SERVER_PID" 2>/dev/null
+        fi
+    done
+) > /dev/null 2>&1 < /dev/null &
 chmod 600 "$PID_FILE" 2>/dev/null || true
 
 cleanup_pid_file() {
+    # A quit interrupts the wait below, so let the server finish deleting its files.
+    if [ "$STOPPING" = true ]; then
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
     if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$SERVER_PID" ]; then
         rm -f "$PID_FILE" "$TOKEN_FILE"
     fi
@@ -272,6 +319,8 @@ trap cleanup_pid_file EXIT
 _attempt=0
 while [ "$_attempt" -lt "$READY_ATTEMPTS" ]; do
     if server_is_ready; then
+        echo "@@URL http://127.0.0.1:$PORT/?token=$API_TOKEN"
+        echo "@@READY"
         open_app_url
         start_ytdlp_update
         remove_old_environments > /dev/null 2>&1 < /dev/null &
@@ -280,6 +329,7 @@ while [ "$_attempt" -lt "$READY_ATTEMPTS" ]; do
     fi
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         wait "$SERVER_PID" 2>/dev/null || true
+        [ "$STOPPING" = true ] && exit 0
         show_launch_failure
         exit 1
     fi

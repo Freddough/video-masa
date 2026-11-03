@@ -87,9 +87,11 @@ def whisper_model_path(model) -> Path:
     return whisper_cache_dir() / f"{model}.pt"
 
 
-def storage_report(work_dir, environment_dir, updates_dir=None) -> dict:
+def storage_report(work_dir, environment_dir, updates_dir=None, python_dir=None) -> dict:
     """Describe what the app occupies on disk, for the Storage panel."""
     locations = [("App environment", environment_dir), ("Temporary downloads", work_dir)]
+    if python_dir:
+        locations.insert(1, ("Python", python_dir))
     if updates_dir:
         locations.append(("yt-dlp updates", updates_dir))
 

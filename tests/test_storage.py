@@ -107,6 +107,18 @@ class StorageHelperTests(unittest.TestCase):
         self.assertEqual(report["total"], "8 KB")
         self.assertEqual(len(without_updates["items"]), 2)
 
+    def test_report_includes_a_private_python_when_there_is_one(self) -> None:
+        self.touch("work/file", 1024)
+        self.touch("env/file", 1024)
+        self.touch("python/bin/python3", 2048)
+
+        report = storage_report(self.root / "work", self.root / "env", python_dir=self.root / "python")
+
+        self.assertEqual(
+            [(item["label"], item["size"]) for item in report["items"]],
+            [("App environment", "1 KB"), ("Python", "2 KB"), ("Temporary downloads", "1 KB")],
+        )
+
 
 class UnsavedWorkTests(unittest.TestCase):
     def test_files_transcripts_and_resumable_jobs_count_until_handled(self) -> None:

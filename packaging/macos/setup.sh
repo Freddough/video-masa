@@ -23,10 +23,19 @@ REQUIREMENTS_FILE="$APP_DIR/requirements.lock.txt"
 if [ -f "$RESOURCES_DIR/VERSION" ]; then
     APP_VERSION="$(tr -d '[:space:]' < "$RESOURCES_DIR/VERSION")"
 else
-    APP_VERSION="3.2.0"
+    APP_VERSION="3.3.0"
 fi
 
+# A private Python means a Homebrew upgrade can't break the app, and nobody needs
+# developer tools or an administrator password. Hashes are from this release's SHA256SUMS.
+PYTHON_RELEASE="20261026"
+PYTHON_VERSION="3.12.16"
+PYTHON_SHA256_ARM64="353d5f1b4fd2715e7053f12f068435d5bbad16b91e057006b5d01e0925709a7e"
+PYTHON_SHA256_X86_64="37c38fda76fec1fbf310adcbafb7f0d96af13b5511bf8ea954c3aa8eec185734"
+CURL_BIN="${VIDEOMASA_CURL_BIN:-/usr/bin/curl}"
+
 TEMP_VENV=""
+TEMP_PYTHON_DIR=""
 VERSION_TEMP=""
 VENV_LINK_TEMP=""
 
@@ -35,6 +44,9 @@ cleanup() {
     trap - EXIT INT TERM
     if [ -n "$TEMP_VENV" ] && [ -e "$TEMP_VENV" ]; then
         rm -rf "$TEMP_VENV"
+    fi
+    if [ -n "$TEMP_PYTHON_DIR" ]; then
+        rm -rf "$TEMP_PYTHON_DIR"
     fi
     if [ -n "$VERSION_TEMP" ]; then
         rm -f "$VERSION_TEMP"
@@ -67,85 +79,70 @@ echo "║     Video Masa — Setup / Repair            ║"
 echo "╚════════════════════════════════════════════╝"
 echo ""
 
-# Current yt-dlp releases need Python 3.11, and the locked torch release has no wheels
-# past 3.12. Try versioned names first because a plain python3 is often newer than that.
-find_python() {
-    if [ -n "${VIDEOMASA_PYTHON:-}" ]; then
-        _candidates=("$VIDEOMASA_PYTHON")
-    else
-        _candidates=()
-        for _bin_dir in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
-            _candidates+=("$_bin_dir/python3.12" "$_bin_dir/python3.11" "$_bin_dir/python3")
-        done
-        _candidates+=(
-            /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
-            /Library/Frameworks/Python.framework/Versions/3.11/bin/python3
-            python3.12
-            python3.11
-            python3
-            python
-        )
+# Tell the app's window what's happening. The details go to the log.
+status() {
+    echo "$*"
+    if [ -n "${VIDEOMASA_STATUS_FD:-}" ]; then
+        echo "@@STATUS $*" >&"$VIDEOMASA_STATUS_FD"
     fi
-
-    for candidate in "${_candidates[@]}"; do
-        _resolved=$(command -v "$candidate" 2>/dev/null || true)
-        [ -n "$_resolved" ] || continue
-        _version=$("$_resolved" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
-        case "$_version" in
-            3.11|3.12)
-                echo "$_resolved"
-                return 0
-                ;;
-        esac
-    done
-    return 1
 }
 
-PYTHON=$(find_python || true)
-
-if [ -z "$PYTHON" ] && [ -n "${VIDEOMASA_PYTHON:-}" ]; then
-    echo "ERROR: VIDEOMASA_PYTHON must be Python 3.11 or 3.12: $VIDEOMASA_PYTHON"
-    exit 1
-fi
-
-if [ -z "$PYTHON" ]; then
-    echo "Python 3.11 or 3.12 not found. Installing Python 3.12 now..."
-    echo ""
-
-    if command -v brew >/dev/null 2>&1; then
-        echo "Installing Python 3.12 via Homebrew..."
-        brew install python@3.12
-    else
-        PYTHON_VERSION="3.12.8"
-        PKG_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-macos11.pkg"
-        PKG_PATH="/tmp/python-${PYTHON_VERSION}.pkg"
-
-        echo "Downloading the signed Python ${PYTHON_VERSION} installer..."
-        /usr/bin/curl --fail --location --progress-bar -o "$PKG_PATH" "$PKG_URL"
-
-        echo "Verifying Python Software Foundation installer signature..."
-        _signature=$(/usr/sbin/pkgutil --check-signature "$PKG_PATH" 2>&1)
-        echo "$_signature"
-        echo "$_signature" | grep -q "Developer ID Installer: Python Software Foundation" || {
-            echo "ERROR: The downloaded installer is not signed by the Python Software Foundation."
-            rm -f "$PKG_PATH"
+install_private_python() {
+    case "$(/usr/bin/uname -m)" in
+        arm64)
+            _platform="aarch64-apple-darwin"
+            _expected_sha256="$PYTHON_SHA256_ARM64"
+            ;;
+        x86_64)
+            _platform="x86_64-apple-darwin"
+            _expected_sha256="$PYTHON_SHA256_X86_64"
+            ;;
+        *)
+            echo "ERROR: Unsupported Mac processor: $(/usr/bin/uname -m)"
             exit 1
-        }
-
-        echo ""
-        echo "Installing Python ${PYTHON_VERSION}..."
-        echo "(You may be prompted for your password)"
-        sudo /usr/sbin/installer -pkg "$PKG_PATH" -target /
-        rm -f "$PKG_PATH"
+            ;;
+    esac
+    _expected_sha256="${VIDEOMASA_PYTHON_ARCHIVE_SHA256:-$_expected_sha256}"
+    PRIVATE_PYTHON_NAME="$PYTHON_VERSION-$PYTHON_RELEASE"
+    _python_home="$VM_HOME/python/$PRIVATE_PYTHON_NAME"
+    PYTHON="$_python_home/bin/python3"
+    if [ -x "$PYTHON" ] && "$PYTHON" -c 'import ssl, venv' >/dev/null 2>&1; then
+        return 0
     fi
 
-    export PATH="/usr/local/bin:/opt/homebrew/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:$PATH"
-    PYTHON=$(find_python || true)
+    status "Downloading Python..."
+    mkdir -p "$VM_HOME/python"
+    TEMP_PYTHON_DIR=$(/usr/bin/mktemp -d "$VM_HOME/python/.download.XXXXXX")
+    _archive="$TEMP_PYTHON_DIR/python.tar.gz"
+    "$CURL_BIN" --fail --location --silent --show-error --retry 3 --connect-timeout 20 --output "$_archive" \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/$PYTHON_RELEASE/cpython-$PYTHON_VERSION+$PYTHON_RELEASE-$_platform-install_only_stripped.tar.gz"
 
-    if [ -z "$PYTHON" ]; then
-        echo "ERROR: Python installation completed but Python 3.11 or 3.12 was not found."
+    _actual_sha256=$(/usr/bin/shasum -a 256 "$_archive" | /usr/bin/cut -d' ' -f1)
+    if [ "$_actual_sha256" != "$_expected_sha256" ]; then
+        echo "ERROR: The downloaded Python did not match its expected hash."
         exit 1
     fi
+
+    /usr/bin/tar -xzf "$_archive" -C "$TEMP_PYTHON_DIR"
+    rm -rf "$_python_home"
+    mv "$TEMP_PYTHON_DIR/python" "$_python_home"
+    rm -rf "$TEMP_PYTHON_DIR"
+    TEMP_PYTHON_DIR=""
+}
+
+PRIVATE_PYTHON_NAME=""
+if [ -n "${VIDEOMASA_PYTHON:-}" ]; then
+    PYTHON="$VIDEOMASA_PYTHON"
+    _version=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)
+    case "$_version" in
+        3.11|3.12) ;;
+        *)
+            echo "ERROR: VIDEOMASA_PYTHON must be Python 3.11 or 3.12: $VIDEOMASA_PYTHON"
+            exit 1
+            ;;
+    esac
+else
+    install_private_python
 fi
 
 echo "Found $("$PYTHON" --version 2>&1) at $PYTHON"
@@ -166,6 +163,7 @@ TEMP_PYTHON="$TEMP_VENV/bin/python"
 echo "       Done."
 echo ""
 
+status "Installing components. This is the longest step..."
 echo "[2/4] Installing locked dependencies (this may take a few minutes)..."
 "$TEMP_PYTHON" -m pip install --disable-pip-version-check --no-cache-dir --upgrade "pip==26.1.2"
 "$TEMP_PYTHON" -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --requirement "$REQUIREMENTS_FILE"
@@ -185,6 +183,7 @@ ln -s "$FFMPEG_EXE" "$TEMP_VENV/bin/ffmpeg"
 echo "       Done."
 echo ""
 
+status "Downloading the speech model..."
 echo "[3/4] Downloading the default speech model (base, ~140 MB)..."
 if [ "${VIDEOMASA_SKIP_MODEL_DOWNLOAD:-0}" != "1" ]; then
     "$TEMP_PYTHON" -c "import whisper; whisper.load_model('base')"
@@ -194,6 +193,7 @@ fi
 echo "       Done."
 echo ""
 
+status "Checking that everything works..."
 echo "[4/4] Verifying the complete installation..."
 "$TEMP_PYTHON" - "$APP_DIR/app.py" <<'PY'
 from pathlib import Path
@@ -248,6 +248,9 @@ mv "$VERSION_TEMP" "$VERSION_FILE"
 VERSION_TEMP=""
 chmod 600 "$VERSION_FILE" 2>/dev/null || true
 /usr/bin/shasum -a 256 "$REQUIREMENTS_FILE" | /usr/bin/cut -d' ' -f1 > "$LOCK_HASH_FILE"
+if [ -n "$PRIVATE_PYTHON_NAME" ]; then
+    ln -sfn "$PRIVATE_PYTHON_NAME" "$VM_HOME/python/current"
+fi
 
 # A repair or app upgrade returns to the locked yt-dlp until the next update check.
 rm -rf "$VM_HOME/ytdlp"

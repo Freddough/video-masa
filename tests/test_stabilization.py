@@ -761,6 +761,7 @@ class StabilizationTests(unittest.TestCase):
             ("get", "/jobs"),
             ("get", "/storage"),
             ("get", "/ytdlp-status"),
+            ("get", "/update-status"),
             ("post", "/storage/remove-model"),
             ("post", "/uninstall"),
         ):
@@ -918,6 +919,22 @@ class StabilizationTests(unittest.TestCase):
             ):
                 self.assertFalse(self.client.get("/storage", base_url=BASE_URL).get_json()["uninstall_available"])
 
+    def test_update_notice_is_for_the_desktop_app_and_checks_once_per_run(self) -> None:
+        self.bootstrap()
+        self.addCleanup(setattr, videomasa, "_update_status", None)
+        with patch("app.check_for_newer_release") as check:
+            response = self.client.get("/update-status", base_url=BASE_URL)
+            self.assertEqual(response.get_json(), {"available": False})
+            check.assert_not_called()
+
+            check.return_value = {"available": True, "version": "9.0.0", "url": "https://example.com/d"}
+            with patch.object(videomasa, "RESOURCES_DIR", "/Applications/Video Masa.app/Contents/Resources"):
+                first = self.client.get("/update-status", base_url=BASE_URL).get_json()
+                second = self.client.get("/update-status", base_url=BASE_URL).get_json()
+        self.assertEqual(first["version"], "9.0.0")
+        self.assertEqual(first, second)
+        check.assert_called_once_with(videomasa.APP_VERSION)
+
     def test_ytdlp_status_route_reports_nothing_when_run_from_source(self) -> None:
         self.bootstrap()
         response = self.client.get("/ytdlp-status", base_url=BASE_URL)
@@ -930,6 +947,7 @@ class StabilizationTests(unittest.TestCase):
         self.assertIn("t.status === 'transcribing'", template)
         self.assertIn("jobQueue.filter(j => !isFinished(j))", template)
         self.assertIn("setTimeout(checkYtdlpFreshness, 60000)", template)
+        self.assertIn("setTimeout(checkForAppUpdate, 5000)", template)
 
     def test_job_renderer_uses_dom_properties_without_inline_handlers(self) -> None:
         template = (Path(__file__).resolve().parents[1] / "templates" / "index.html").read_text()

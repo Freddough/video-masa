@@ -1,10 +1,13 @@
 import hashlib
+import io
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import textwrap
 import time
@@ -14,6 +17,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MACOS_DIR = PROJECT_ROOT / "packaging" / "macos"
+APP_VERSION = (PROJECT_ROOT / "VERSION").read_text().strip()
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -69,7 +73,7 @@ class MacOSPackagingTests(unittest.TestCase):
         python_path = self.state / "venv" / "bin" / "python"
         write_executable(python_path, python_body)
         self.state.mkdir(parents=True, exist_ok=True)
-        (self.state / "version").write_text("3.2.0\n")
+        (self.state / "version").write_text(f"{APP_VERSION}\n")
         return python_path
 
     def write_health_server(self) -> Path:
@@ -86,7 +90,7 @@ class MacOSPackagingTests(unittest.TestCase):
                             self.send_response(200)
                             self.send_header("Content-Type", "application/json")
                             self.end_headers()
-                            self.wfile.write(b'{"all_ok":true,"app_version":"3.2.0"}')
+                            self.wfile.write(b'{"all_ok":true,"app_version":"@VERSION@"}')
                         else:
                             self.send_response(404)
                             self.end_headers()
@@ -98,7 +102,7 @@ class MacOSPackagingTests(unittest.TestCase):
                     ("127.0.0.1", int(os.environ["VIDEOMASA_PORT"])), Handler
                 ).serve_forever()
                 """
-            )
+            ).replace("@VERSION@", APP_VERSION)
         )
         return server_helper
 
@@ -111,32 +115,13 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn('cp "$PROJECT_DIR/VERSION" "$BUILD_DIR/"', windows_build)
         self.assertIn('VideoMasa-${APP_VERSION}-Windows.zip', windows_build)
 
-    def test_launcher_detects_broken_python_symlink_and_safely_opens_setup(self) -> None:
+    def test_launcher_detects_broken_python_symlink_and_runs_setup(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
         broken_python.parent.mkdir(parents=True)
         broken_python.symlink_to("/missing/homebrew/python3.13")
-        (self.state / "version").write_text("3.2.0\n")
+        (self.state / "version").write_text(f"{APP_VERSION}\n")
 
-        osascript_log = self.root / "osascript-args.txt"
-        fake_osascript = self.root / "fake-osascript"
-        write_executable(
-            fake_osascript,
-            f"""\
-            #!/bin/bash
-            printf '%s\\n' "$@" > {str(osascript_log)!r}
-            """,
-        )
-
-        result = self.run_script(
-            "launcher.sh",
-            VIDEOMASA_OSASCRIPT_BIN=str(fake_osascript),
-            VIDEOMASA_OPEN_BIN="/usr/bin/true",
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        args = osascript_log.read_text().splitlines()
-        self.assertEqual(args[0], "-")
-        self.assertEqual(args[1], str(self.resources / "setup.sh"))
+        self.assertTrue(self.launcher_opens_setup())
         self.assertTrue(broken_python.is_symlink(), "launcher must not delete the old environment")
 
     def test_launcher_uses_exact_venv_interpreter_and_cleans_pid_after_exit(self) -> None:
@@ -323,10 +308,12 @@ class MacOSPackagingTests(unittest.TestCase):
                 if not supported:
                     self.assertIn("VIDEOMASA_PYTHON must be", result.stdout)
 
-    def test_setup_installs_a_python_version_its_dependencies_support(self) -> None:
+    def test_first_launch_needs_no_terminal_password_or_homebrew(self) -> None:
         setup = (MACOS_DIR / "setup.sh").read_text()
-        self.assertIn("brew install python@3.12", setup)
-        self.assertNotIn("Versions/3.13", setup)
+        launcher = (MACOS_DIR / "launcher.sh").read_text()
+        for needed_by_nobody in ("brew install", "sudo ", "python.org", 'tell application "Terminal"', "do script"):
+            self.assertNotIn(needed_by_nobody, setup)
+            self.assertNotIn(needed_by_nobody, launcher)
 
     def test_setup_atomically_replaces_and_preserves_broken_environment(self) -> None:
         broken_python = self.state / "venv" / "bin" / "python"
@@ -348,7 +335,7 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertTrue((self.state / "venv").is_symlink())
         self.assertTrue((self.state / "venv" / "bin" / "python").exists())
         self.assertTrue((self.state / "venv" / "bin" / "ffmpeg").is_symlink())
-        self.assertEqual((self.state / "version").read_text(), "3.2.0\n")
+        self.assertEqual((self.state / "version").read_text(), f"{APP_VERSION}\n")
         backups = list(self.state.glob("venv.broken-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "bin" / "python").is_symlink())
@@ -377,7 +364,7 @@ class MacOSPackagingTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((app_dir / "__pycache__").exists())
-        self.assertEqual((self.state / "version").read_text(), "3.2.0\n")
+        self.assertEqual((self.state / "version").read_text(), f"{APP_VERSION}\n")
 
     def launch_recording_ytdlp_update(self) -> tuple:
         """Launch a fake server that stops once the browser opens; return the two logs."""
@@ -492,21 +479,23 @@ class MacOSPackagingTests(unittest.TestCase):
         return hashlib.sha256(lock_file.read_bytes()).hexdigest()
 
     def launcher_opens_setup(self) -> bool:
-        osascript_log = self.root / "osascript-args.txt"
-        osascript_log.unlink(missing_ok=True)
-        fake_osascript = self.root / "fake-osascript"
-        write_executable(fake_osascript, f"#!/bin/bash\nprintf '%s\\n' \"$@\" > {str(osascript_log)!r}\n")
+        setup = self.resources / "setup.sh"
+        original = setup.read_text()
+        marker = self.root / "setup-ran.txt"
+        marker.unlink(missing_ok=True)
+        write_executable(setup, f"#!/bin/bash\ntouch {str(marker)!r}\nexit 1\n")
         fake_open = self.root / "fake-open"
         write_executable(fake_open, f"#!/bin/bash\nkill \"$(cat {str(self.state / 'server.pid')!r})\"\n")
-        result = self.run_script(
-            "launcher.sh",
-            VIDEOMASA_PORT=str(free_port()),
-            VIDEOMASA_OPEN_BIN=str(fake_open),
-            VIDEOMASA_OSASCRIPT_BIN=str(fake_osascript),
-            VIDEOMASA_READY_ATTEMPTS="40",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return osascript_log.exists()
+        try:
+            self.run_script(
+                "launcher.sh",
+                VIDEOMASA_PORT=str(free_port()),
+                VIDEOMASA_OPEN_BIN=str(fake_open),
+                VIDEOMASA_READY_ATTEMPTS="40",
+            )
+        finally:
+            setup.write_text(original)
+        return marker.exists()
 
     def make_runnable_venv(self) -> None:
         server_helper = self.write_health_server()
@@ -540,7 +529,7 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertTrue(self.launcher_opens_setup())
         self.assertFalse(hash_file.exists())
 
-        (self.state / "version").write_text("3.2.0\n")
+        (self.state / "version").write_text(f"{APP_VERSION}\n")
         self.assertFalse(self.launcher_opens_setup())
         self.assertEqual(hash_file.read_text().strip(), self.locked_packages_hash())
 
@@ -585,12 +574,20 @@ class MacOSPackagingTests(unittest.TestCase):
         (self.state / "venv.previous-old").symlink_to("venv.runtime-old")
         unrelated = self.state / "venvs-notes.txt"
         unrelated.write_text("keep")
+        pythons = self.state / "python"
+        for name in ("3.12.15-old", "3.12.16-new"):
+            (pythons / name).mkdir(parents=True)
+        (pythons / "current").symlink_to("3.12.16-new")
 
         self.assertFalse(self.launcher_opens_setup())
 
         self.assertEqual(self.wait_for_old_environments_to_go(), ["venv.runtime-current"])
         self.assertTrue((self.state / "venv" / "bin" / "python").exists())
         self.assertTrue(unrelated.exists())
+        deadline = time.time() + 5
+        while (pythons / "3.12.15-old").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(sorted(path.name for path in pythons.iterdir()), ["3.12.16-new", "current"])
 
     def test_old_environments_stay_while_a_repair_is_running(self) -> None:
         self.make_runnable_venv()
@@ -672,6 +669,291 @@ class MacOSPackagingTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertTrue(home.exists())
+
+    def fake_setup(self, body: str) -> None:
+        write_executable(self.resources / "setup.sh", "#!/bin/bash\n" + body)
+
+    def launcher_output_lines(self, result: subprocess.CompletedProcess) -> list:
+        return [line for line in result.stdout.splitlines() if line.startswith("@@")]
+
+    def test_launcher_runs_setup_in_place_and_reports_progress(self) -> None:
+        self.make_runnable_venv()
+        (self.state / "version").write_text("1.0.0\n")
+        self.fake_setup(
+            """\
+            echo "detail for the log"
+            echo "@@STATUS Installing" >&"$VIDEOMASA_STATUS_FD"
+            [ "$VIDEOMASA_SKIP_RELAUNCH" = "1" ] || echo "@@STATUS relaunch not skipped" >&3
+            exit 0
+            """.replace("            ", "")
+        )
+        fake_open = self.root / "fake-open"
+        write_executable(fake_open, f"#!/bin/bash\nkill \"$(cat {str(self.state / 'server.pid')!r})\"\n")
+        osascript_log = self.root / "osascript.txt"
+        fake_osascript = self.root / "fake-osascript"
+        write_executable(fake_osascript, f"#!/bin/bash\ntouch {str(osascript_log)!r}\n")
+        port = free_port()
+
+        result = self.run_script(
+            "launcher.sh",
+            VIDEOMASA_PORT=str(port),
+            VIDEOMASA_OPEN_BIN=str(fake_open),
+            VIDEOMASA_OSASCRIPT_BIN=str(fake_osascript),
+            VIDEOMASA_READY_ATTEMPTS="40",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = self.launcher_output_lines(result)
+        self.assertEqual(lines[:2], ["@@STATUS Getting started...", "@@STATUS Installing"])
+        self.assertTrue(lines[2].startswith(f"@@URL http://127.0.0.1:{port}/?token="))
+        self.assertEqual(lines[3], "@@READY")
+        log = (self.state / "setup.log").read_text()
+        self.assertIn("detail for the log", log)
+        self.assertNotIn("@@STATUS", log)
+        self.assertFalse(osascript_log.exists(), "first launch must not script other apps")
+
+    def test_failed_setup_tells_the_window_and_starts_nothing(self) -> None:
+        self.fake_setup("echo 'pip exploded'\nexit 7\n")
+
+        result = self.run_script("launcher.sh", VIDEOMASA_PORT=str(free_port()))
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(
+            self.launcher_output_lines(result)[-1],
+            "@@FAILED Please check your internet connection and try again.",
+        )
+        self.assertIn("pip exploded", (self.state / "setup.log").read_text())
+        self.assertFalse((self.state / "server.pid").exists())
+
+    def start_launcher(self) -> subprocess.Popen:
+        return subprocess.Popen(
+            ["/bin/bash", str(self.resources / "launcher.sh")],
+            env={
+                **os.environ,
+                "VIDEOMASA_HOME": str(self.state),
+                "VIDEOMASA_PORT": str(free_port()),
+                "VIDEOMASA_OPEN_BIN": "/usr/bin/true",
+                "VIDEOMASA_OSASCRIPT_BIN": "/usr/bin/true",
+                "VIDEOMASA_READY_ATTEMPTS": "40",
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+    def test_quitting_stops_the_server_and_cleans_up(self) -> None:
+        self.make_runnable_venv()
+        launcher = self.start_launcher()
+        self.addCleanup(launcher.kill)
+        for line in launcher.stdout:
+            if line.startswith("@@READY"):
+                break
+        server_pid = int((self.state / "server.pid").read_text())
+
+        launcher.send_signal(signal.SIGTERM)
+        launcher.communicate(timeout=20)
+
+        with self.assertRaises(ProcessLookupError):
+            os.kill(server_pid, 0)
+        self.assertFalse((self.state / "server.pid").exists())
+        self.assertFalse((self.state / "server.token").exists())
+
+    def test_force_quitting_the_app_stops_the_server(self) -> None:
+        self.make_runnable_venv()
+        env = {
+            **os.environ,
+            "VIDEOMASA_HOME": str(self.state),
+            "VIDEOMASA_PORT": str(free_port()),
+            "VIDEOMASA_OPEN_BIN": "/usr/bin/true",
+            "VIDEOMASA_OSASCRIPT_BIN": "/usr/bin/true",
+        }
+        launcher_path = str(self.resources / "launcher.sh")
+        # The parent exits straight away, so the launcher is left like after a force quit.
+        subprocess.run(
+            ["/bin/bash", "-c", '/bin/bash "$1" > /dev/null 2>&1 < /dev/null &', "parent", launcher_path],
+            env=env,
+            check=True,
+        )
+        pid_file = self.state / "server.pid"
+        deadline = time.time() + 20
+        server_pid = None
+        while time.time() < deadline:
+            if pid_file.exists() and pid_file.read_text().strip():
+                server_pid = int(pid_file.read_text())
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(server_pid)
+        self.addCleanup(lambda: subprocess.run(["kill", str(server_pid)], capture_output=True))
+
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                os.kill(server_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.2)
+        else:
+            self.fail("server kept running after the app was force quit")
+
+    def test_quitting_during_setup_stops_it_without_reporting_a_failure(self) -> None:
+        setup_pid_file = self.root / "setup-pid.txt"
+        self.fake_setup(
+            f"echo $$ > {str(setup_pid_file)!r}\n"
+            'echo "@@STATUS Working" >&"$VIDEOMASA_STATUS_FD"\n'
+            "sleep 60 &\nwait $!\n"
+        )
+        launcher = self.start_launcher()
+        self.addCleanup(launcher.kill)
+        for line in launcher.stdout:
+            if line.startswith("@@STATUS Working"):
+                break
+
+        launcher.send_signal(signal.SIGTERM)
+        remaining, _ = launcher.communicate(timeout=20)
+
+        self.assertNotIn("@@FAILED", remaining)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(setup_pid_file.read_text()), 0)
+
+    def test_repair_runs_setup_again_without_leaving_the_app(self) -> None:
+        self.make_healthy_venv("#!/bin/bash\n[ \"${1:-}\" = \"-c\" ] && exit 0\nexit 42\n")
+        (self.state / "lock-hash").write_text(f"{self.locked_packages_hash()}\n")
+        fake_osascript = self.root / "fake-osascript"
+        write_executable(fake_osascript, "#!/bin/bash\ncat >/dev/null\necho 'Repair Installation'\n")
+        marker = self.root / "repair-ran.txt"
+        self.fake_setup(f"touch {str(marker)!r}\nexit 1\n")
+
+        result = self.run_script(
+            "launcher.sh",
+            VIDEOMASA_PORT=str(free_port()),
+            VIDEOMASA_OSASCRIPT_BIN=str(fake_osascript),
+            VIDEOMASA_READY_ATTEMPTS="4",
+        )
+
+        self.assertTrue(marker.exists())
+        self.assertFalse((self.state / "version").exists())
+        self.assertFalse((self.state / "lock-hash").exists())
+        self.assertEqual(self.launcher_output_lines(result)[-1], "@@FAILED Please check your internet connection and try again.")
+
+    def make_python_archive(self) -> tuple:
+        """Return a tarball shaped like the real download, and its hash."""
+        fake_python = self.make_fake_base_python(fail_pip=False)
+        archive = self.root / "python.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            data = fake_python.read_bytes()
+            info = tarfile.TarInfo("python/bin/python3")
+            info.size = len(data)
+            info.mode = 0o755
+            tar.addfile(info, io.BytesIO(data))
+        return archive, hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    def fake_curl(self, source: Path = None, exit_code: int = 0) -> tuple:
+        """Return a curl that serves a file and records each call."""
+        calls = self.root / "curl-calls.txt"
+        curl = self.root / "fake-curl"
+        copy = f'cp {str(source)!r} "$output"' if source else 'printf junk > "$output"'
+        write_executable(
+            curl,
+            "#!/bin/bash\n"
+            f"echo \"${{@: -1}}\" >> {str(calls)!r}\n"
+            "while [ $# -gt 0 ]; do [ \"$1\" = \"--output\" ] && output=\"$2\"; shift; done\n"
+            f"[ {exit_code} -eq 0 ] || exit {exit_code}\n"
+            f"{copy}\n",
+        )
+        return curl, calls
+
+    def setup_env(self, curl: Path, **extra: str) -> dict:
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+        return {
+            "VIDEOMASA_CURL_BIN": str(curl),
+            "VIDEOMASA_SKIP_MODEL_DOWNLOAD": "1",
+            "VIDEOMASA_FFMPEG": str(fake_bin / "ffmpeg"),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            **extra,
+        }
+
+    def test_setup_installs_its_own_python_once_and_records_it(self) -> None:
+        archive, sha256 = self.make_python_archive()
+        curl, calls = self.fake_curl(archive)
+        env = self.setup_env(curl, VIDEOMASA_PYTHON_ARCHIVE_SHA256=sha256)
+
+        result = self.run_script("setup.sh", **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        urls = calls.read_text().splitlines()
+        self.assertEqual(len(urls), 1)
+        self.assertIn("astral-sh/python-build-standalone/releases/download/", urls[0])
+        self.assertIn("apple-darwin-install_only_stripped.tar.gz", urls[0])
+        current = self.state / "python" / "current"
+        self.assertTrue(current.is_symlink())
+        self.assertTrue((current / "bin" / "python3").exists())
+        self.assertEqual([path.name for path in (self.state / "python").glob(".download.*")], [])
+
+        result = self.run_script("setup.sh", **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(calls.read_text().splitlines()), 1, "Python should not download twice")
+
+    def test_setup_rejects_a_python_download_with_the_wrong_hash(self) -> None:
+        curl, _ = self.fake_curl()
+
+        result = self.run_script("setup.sh", **self.setup_env(curl))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not match its expected hash", result.stdout)
+        self.assertEqual(sorted(path.name for path in (self.state / "python").iterdir()), [])
+        self.assertFalse((self.state / "venv").exists())
+
+    def test_setup_fails_cleanly_when_python_cannot_be_downloaded(self) -> None:
+        curl, _ = self.fake_curl(exit_code=22)
+
+        result = self.run_script("setup.sh", **self.setup_env(curl))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sorted(path.name for path in (self.state / "python").iterdir()), [])
+        self.assertFalse((self.state / "setup.lock").exists())
+
+    def test_setup_pins_a_hash_for_each_mac_processor(self) -> None:
+        setup = (MACOS_DIR / "setup.sh").read_text()
+        self.assertRegex(setup, r'PYTHON_SHA256_ARM64="[0-9a-f]{64}"')
+        self.assertRegex(setup, r'PYTHON_SHA256_X86_64="[0-9a-f]{64}"')
+
+    def test_real_setup_reports_each_step_to_the_window(self) -> None:
+        archive, sha256 = self.make_python_archive()
+        curl, _ = self.fake_curl(archive)
+
+        result = self.run_script(
+            "launcher.sh",
+            VIDEOMASA_PORT=str(free_port()),
+            VIDEOMASA_READY_ATTEMPTS="2",
+            **self.setup_env(curl, VIDEOMASA_PYTHON_ARCHIVE_SHA256=sha256),
+        )
+
+        statuses = [line for line in self.launcher_output_lines(result) if line.startswith("@@STATUS")]
+        self.assertEqual(
+            statuses,
+            [
+                "@@STATUS Getting started...",
+                "@@STATUS Downloading Python...",
+                "@@STATUS Installing components. This is the longest step...",
+                "@@STATUS Downloading the speech model...",
+                "@@STATUS Checking that everything works...",
+            ],
+        )
+
+    def test_app_shell_handles_the_dock_and_running_from_the_disk_image(self) -> None:
+        shell = (MACOS_DIR / "VideoMasaApp.swift").read_text()
+        self.assertIn("applicationShouldHandleReopen", shell)
+        self.assertIn("applicationShouldTerminate", shell)
+        self.assertIn('path.hasPrefix("/Volumes/")', shell)
+        self.assertIn('path.contains("/AppTranslocation/")', shell)
+
+    def test_build_makes_a_universal_shell_and_a_stable_download_name(self) -> None:
+        build = (MACOS_DIR / "build_dmg.sh").read_text()
+        self.assertIn("-target arm64-apple-macos", build)
+        self.assertIn("-target x86_64-apple-macos", build)
+        self.assertIn('"$DIST_DIR/VideoMasa.dmg"', build)
+        self.assertIn('--options runtime --timestamp --sign "$SIGN_ID" "$APP_BUNDLE/Contents/MacOS/VideoMasa"', build)
 
     def test_build_packages_the_uninstall_script(self) -> None:
         build = (MACOS_DIR / "build_dmg.sh").read_text()
