@@ -247,6 +247,9 @@ mv "$VERSION_TEMP" "$VERSION_FILE"
 VERSION_TEMP=""
 chmod 600 "$VERSION_FILE" 2>/dev/null || true
 
+# A repair or app upgrade returns to the locked yt-dlp until the next update check.
+rm -rf "$VM_HOME/ytdlp"
+
 echo ""
 echo "╔════════════════════════════════════════════╗"
 echo "║     Setup complete! Launching app...       ║"

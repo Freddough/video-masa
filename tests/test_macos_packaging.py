@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -68,6 +69,36 @@ class MacOSPackagingTests(unittest.TestCase):
         (self.state / "version").write_text("3.2.0\n")
         return python_path
 
+    def write_health_server(self) -> Path:
+        server_helper = self.root / "health_server.py"
+        server_helper.write_text(
+            textwrap.dedent(
+                """\
+                import http.server
+                import os
+
+                class Handler(http.server.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        if self.path == "/health":
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json")
+                            self.end_headers()
+                            self.wfile.write(b'{"all_ok":true,"app_version":"3.2.0"}')
+                        else:
+                            self.send_response(404)
+                            self.end_headers()
+
+                    def log_message(self, *_args):
+                        pass
+
+                http.server.HTTPServer(
+                    ("127.0.0.1", int(os.environ["VIDEOMASA_PORT"])), Handler
+                ).serve_forever()
+                """
+            )
+        )
+        return server_helper
+
     def test_desktop_builds_include_backend_package_and_version_manifest(self) -> None:
         mac_build = (MACOS_DIR / "build_dmg.sh").read_text()
         windows_build = (PROJECT_ROOT / "packaging" / "windows" / "build_zip.sh").read_text()
@@ -108,37 +139,11 @@ class MacOSPackagingTests(unittest.TestCase):
     def test_launcher_uses_exact_venv_interpreter_and_cleans_pid_after_exit(self) -> None:
         port = free_port()
         invocation_log = self.root / "python-invocation.txt"
-        server_helper = self.root / "health_server.py"
-        server_helper.write_text(
-            textwrap.dedent(
-                """\
-                import http.server
-                import os
-
-                class Handler(http.server.BaseHTTPRequestHandler):
-                    def do_GET(self):
-                        if self.path == "/health":
-                            self.send_response(200)
-                            self.send_header("Content-Type", "application/json")
-                            self.end_headers()
-                            self.wfile.write(b'{"all_ok":true,"app_version":"3.2.0"}')
-                        else:
-                            self.send_response(404)
-                            self.end_headers()
-
-                    def log_message(self, *_args):
-                        pass
-
-                http.server.HTTPServer(
-                    ("127.0.0.1", int(os.environ["VIDEOMASA_PORT"])), Handler
-                ).serve_forever()
-                """
-            )
-        )
+        server_helper = self.write_health_server()
         self.make_healthy_venv(
             f"""\
             #!/bin/bash
-            if [ "${{1:-}}" = "-c" ]; then
+            if [ "${{1:-}}" = "-c" ] || [ "${{1:-}}" = "-m" ]; then
                 exit 0
             fi
             printf '%s\\n' "$*" > {str(invocation_log)!r}
@@ -370,6 +375,109 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((app_dir / "__pycache__").exists())
         self.assertEqual((self.state / "version").read_text(), "3.2.0\n")
+
+    def launch_recording_ytdlp_update(self) -> tuple:
+        """Launch a fake server that stops once the browser opens; return the two logs."""
+        server_helper = self.write_health_server()
+        update_log = self.root / "update-invocation.txt"
+        path_log = self.root / "server-path.txt"
+        self.make_healthy_venv(
+            f"""\
+            #!/bin/bash
+            if [ "${{1:-}}" = "-c" ]; then
+                exit 0
+            fi
+            if [ "${{1:-}}" = "-m" ]; then
+                printf '%s\\n' "$PWD" "$@" > {str(update_log)!r}.tmp
+                mv {str(update_log)!r}.tmp {str(update_log)!r}
+                exit 0
+            fi
+            printf '%s' "$PATH" > {str(path_log)!r}
+            exec {sys.executable!r} {str(server_helper)!r}
+            """
+        )
+        fake_open = self.root / "fake-open"
+        write_executable(
+            fake_open,
+            f"""\
+            #!/bin/bash
+            kill "$(cat {str(self.state / 'server.pid')!r})"
+            """,
+        )
+        result = self.run_script(
+            "launcher.sh",
+            VIDEOMASA_PORT=str(free_port()),
+            VIDEOMASA_OPEN_BIN=str(fake_open),
+            VIDEOMASA_READY_ATTEMPTS="40",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deadline = time.time() + 3
+        while not update_log.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        return update_log, path_log
+
+    def test_launcher_starts_ytdlp_update_and_prefers_updated_copy_on_path(self) -> None:
+        update_log, path_log = self.launch_recording_ytdlp_update()
+
+        self.assertEqual(
+            update_log.read_text().splitlines(),
+            [
+                str(self.resources / "app"),
+                "-m",
+                "videomasa.ytdlp_update",
+                str(self.state / "ytdlp"),
+            ],
+        )
+        path_parts = path_log.read_text().split(":")
+        self.assertLess(
+            path_parts.index(str(self.state / "ytdlp" / "bin")),
+            path_parts.index(str(self.state / "venv" / "bin")),
+        )
+
+    def test_launcher_skips_ytdlp_update_when_opted_out(self) -> None:
+        self.state.mkdir(parents=True)
+        (self.state / "no-ytdlp-update").touch()
+
+        update_log, _ = self.launch_recording_ytdlp_update()
+
+        self.assertFalse(update_log.exists())
+
+    def test_launcher_keeps_working_updated_ytdlp_and_drops_broken_one(self) -> None:
+        link = self.state / "ytdlp" / "bin" / "yt-dlp"
+        link.parent.mkdir(parents=True)
+        working = self.root / "working-yt-dlp"
+        write_executable(working, "#!/bin/bash\necho 2026.11.02\n")
+        link.symlink_to(working)
+
+        stamp = self.state / "ytdlp" / "last-check"
+        stamp.touch()
+        self.launch_recording_ytdlp_update()
+        self.assertTrue(link.is_symlink())
+        self.assertTrue(stamp.exists())
+
+        link.unlink()
+        link.symlink_to("/missing/python/yt-dlp")
+        self.launch_recording_ytdlp_update()
+        self.assertFalse(link.is_symlink())
+        self.assertFalse(stamp.exists())
+
+    def test_setup_returns_to_locked_ytdlp_only_after_success(self) -> None:
+        fake_bin = self.root / "bin"
+        write_executable(fake_bin / "ffmpeg", "#!/bin/bash\necho 'ffmpeg version test'\n")
+        updated = self.state / "ytdlp" / "bin" / "yt-dlp"
+        updated.parent.mkdir(parents=True)
+        updated.write_text("updated copy")
+
+        for fail_pip, should_remain in ((True, True), (False, False)):
+            with self.subTest(fail_pip=fail_pip):
+                self.run_script(
+                    "setup.sh",
+                    VIDEOMASA_PYTHON=str(self.make_fake_base_python(fail_pip=fail_pip)),
+                    VIDEOMASA_SKIP_MODEL_DOWNLOAD="1",
+                    VIDEOMASA_FFMPEG=str(fake_bin / "ffmpeg"),
+                    PATH=f"{fake_bin}:{os.environ['PATH']}",
+                )
+                self.assertEqual(updated.exists(), should_remain)
 
 
 if __name__ == "__main__":
