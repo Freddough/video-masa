@@ -16,7 +16,7 @@ trap 'rm -rf "$PYTHON_CACHE_DIR"' EXIT
 echo "Validating Video Masa $APP_VERSION source..."
 "$PYTHON_BIN" -m unittest discover -s tests -v
 "$PYTHON_BIN" -m py_compile app.py videomasa/*.py tests/*.py
-bash -n packaging/macos/build_dmg.sh packaging/macos/launcher.sh packaging/macos/setup.sh
+bash -n packaging/macos/build_dmg.sh packaging/macos/launcher.sh packaging/macos/setup.sh packaging/macos/uninstall.sh
 awk '/<script>/{capture=1; next} /<\/script>/{capture=0} capture' templates/index.html | node --check -
 plutil -lint packaging/macos/Info.plist
 

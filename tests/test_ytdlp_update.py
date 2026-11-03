@@ -22,6 +22,7 @@ class YtDlpUpdateTests(unittest.TestCase):
         self.locked = "2026.7.4"
         self.latest = "2026.11.2"
         self.yanked = False
+        self.extra_releases = {}
         self.pypi_fails = False
         self.pip_fails = False
         self.reported_version = None
@@ -34,13 +35,22 @@ class YtDlpUpdateTests(unittest.TestCase):
     def stamp(self) -> Path:
         return self.updates / "last-check"
 
+    @staticmethod
+    def wheel(uploaded="2020-01-01T00:00:00.000000Z", yanked=False, requires_python=">=3.10") -> list:
+        return [{
+            "packagetype": "bdist_wheel",
+            "upload_time_iso_8601": uploaded,
+            "yanked": yanked,
+            "requires_python": requires_python,
+        }]
+
     def fake_run(self, command, **_kwargs) -> subprocess.CompletedProcess:
         self.commands.append(command)
         if command[0] == "/usr/bin/curl":
             if self.pypi_fails:
                 return subprocess.CompletedProcess(command, 22, "", "offline")
-            body = json.dumps({"info": {"version": self.latest, "yanked": self.yanked}})
-            return subprocess.CompletedProcess(command, 0, body, "")
+            releases = {self.latest: self.wheel(yanked=self.yanked), **self.extra_releases}
+            return subprocess.CompletedProcess(command, 0, json.dumps({"releases": releases}), "")
         if "venv" in command:
             Path(command[-1], "bin").mkdir(parents=True)
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -99,6 +109,7 @@ class YtDlpUpdateTests(unittest.TestCase):
         pip_install = self.pip_commands()[0]
         self.assertIn("yt-dlp[default]==2026.11.2", pip_install)
         self.assertIn(":all:", pip_install)
+        self.assertIn("--no-cache-dir", pip_install)
         self.assertEqual(
             pip_install[pip_install.index("--python") + 1],
             str(self.updates / "releases" / "2026.11.2" / "bin" / "python"),
@@ -151,7 +162,7 @@ class YtDlpUpdateTests(unittest.TestCase):
                 self.commands.clear()
                 self.stamp.unlink(missing_ok=True)
 
-                self.assertIn("unusable", self.run_update())
+                self.assertIn("No yt-dlp release", self.run_update())
                 self.assertEqual(self.pip_commands(), [])
 
     def test_failed_install_keeps_current_copy_and_retries_next_launch(self) -> None:
@@ -205,6 +216,48 @@ class YtDlpUpdateTests(unittest.TestCase):
         ):
             self.assertEqual(ytdlp_update.update_ytdlp(self.updates), "Updated yt-dlp to 2026.12.1.")
         self.assertEqual(self.active_release(), "2026.12.1")
+
+    def test_new_release_waits_out_the_cooldown_and_the_last_settled_one_is_used(self) -> None:
+        now = time.time()
+        fresh = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(now - 86_400))
+        settled = time.strftime("%Y-%m-%dT%H:%M:%S.000000Z", time.gmtime(now - 3 * 86_400))
+        self.extra_releases = {
+            "2026.12.1": self.wheel(uploaded=fresh),
+            "2026.11.20": self.wheel(uploaded=settled),
+        }
+
+        self.assertEqual(self.run_update(), "Updated yt-dlp to 2026.11.20.")
+        self.assertEqual(self.active_release(), "2026.11.20")
+
+    def test_releases_for_a_newer_python_are_skipped(self) -> None:
+        data = {"releases": {
+            "2030.1.1": self.wheel(requires_python=">=3.13"),
+            "2029.1.1": self.wheel(requires_python=">= 3.12"),
+            "2028.1.1": self.wheel(requires_python=">=3.11"),
+        }}
+        self.assertEqual(ytdlp_update.pick_release(data, python_version=(3, 12)), "2029.1.1")
+        self.assertEqual(ytdlp_update.pick_release(data, python_version=(3, 11)), "2028.1.1")
+        self.assertIsNone(ytdlp_update.pick_release(data, python_version=(3, 10)))
+
+    def test_releases_without_a_usable_wheel_are_skipped(self) -> None:
+        data = {"releases": {
+            "2030.1.1": [],
+            "2029.1.1": [{"packagetype": "sdist", "upload_time_iso_8601": "2020-01-01T00:00:00Z"}],
+            "2028.1.1": self.wheel(uploaded="unknown"),
+            "2027.1.1.dev0": self.wheel(),
+            "2026.1.1": self.wheel(),
+        }}
+        self.assertEqual(ytdlp_update.pick_release(data), "2026.1.1")
+
+    def test_last_failure_is_recorded_and_cleared_by_the_next_success(self) -> None:
+        self.updates.mkdir(parents=True)
+        self.pip_fails = True
+        self.run_main()
+        self.assertIn("no matching distribution", (self.updates / "last-error").read_text())
+
+        self.pip_fails = False
+        self.run_main()
+        self.assertFalse((self.updates / "last-error").exists())
 
     def test_only_active_and_previous_releases_are_kept(self) -> None:
         for latest in ("2026.11.2", "2026.12.1", "2027.1.5"):

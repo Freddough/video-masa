@@ -14,11 +14,13 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from importlib import metadata
 from pathlib import Path
 
 
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+COOLDOWN_SECONDS = 2 * 24 * 60 * 60
 INSTALL_TIMEOUT_SECONDS = 600
 KEEP_RELEASES = 2
 PYPI_URL = "https://pypi.org/pypi/yt-dlp/json"
@@ -40,11 +42,41 @@ def _run(command, timeout) -> str:
     return result.stdout
 
 
-def _fetch_latest_version():
-    info = json.loads(
-        _run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "20", PYPI_URL], 30)
-    )["info"]
-    return None if info.get("yanked") else info.get("version")
+def _fetch_pypi_data() -> dict:
+    return json.loads(
+        _run(["/usr/bin/curl", "--fail", "--silent", "--show-error", "--max-time", "30", PYPI_URL], 40)
+    )
+
+
+def _supports_python(requires_python, python_version) -> bool:
+    match = re.match(r">=\s*(\d+)\.(\d+)", requires_python or "")
+    return not match or python_version >= (int(match.group(1)), int(match.group(2)))
+
+
+def pick_release(pypi_data, now=None, python_version=None):
+    """Return the newest stable release that has been out long enough and runs on this Python.
+
+    The wait gives a bad or compromised release time to be noticed and pulled.
+    """
+    now = time.time() if now is None else now
+    python_version = sys.version_info[:2] if python_version is None else python_version
+    best = None
+    for version, files in pypi_data.get("releases", {}).items():
+        parsed = parse_version(version)
+        wheel = next((item for item in files if item.get("packagetype") == "bdist_wheel"), None)
+        if parsed is None or wheel is None or wheel.get("yanked"):
+            continue
+        if not _supports_python(wheel.get("requires_python"), python_version):
+            continue
+        uploaded = wheel.get("upload_time_iso_8601", "").replace("Z", "+00:00")
+        try:
+            if now - datetime.fromisoformat(uploaded).timestamp() < COOLDOWN_SECONDS:
+                continue
+        except ValueError:
+            continue
+        if best is None or parsed > parse_version(best):
+            best = version
+    return best
 
 
 def _current_version(updates_dir: Path):
@@ -76,7 +108,7 @@ def _install_release(updates_dir: Path, version: str) -> Path:
         _run(
             [
                 sys.executable, "-m", "pip", "--python", str(release / "bin" / "python"),
-                "install", "--disable-pip-version-check", "--no-input",
+                "install", "--disable-pip-version-check", "--no-input", "--no-cache-dir",
                 "--only-binary", ":all:", f"yt-dlp[default]=={version}",
             ],
             INSTALL_TIMEOUT_SECONDS,
@@ -123,16 +155,15 @@ def update_ytdlp(updates_dir: Path) -> str:
         if not _check_is_due(stamp):
             return "Checked for a yt-dlp update recently."
 
-        latest = _fetch_latest_version()
-        latest_version = parse_version(latest)
-        if latest_version is None:
+        latest = pick_release(_fetch_pypi_data())
+        if latest is None:
             stamp.touch()
-            return f"Ignoring unusable yt-dlp release on PyPI: {latest!r}."
+            return "No yt-dlp release on PyPI is ready to install yet."
 
         current_version = _current_version(updates_dir)
-        if current_version is not None and current_version >= latest_version:
+        if current_version is not None and current_version >= parse_version(latest):
             stamp.touch()
-            return f"yt-dlp is up to date (PyPI has {latest})."
+            return f"yt-dlp is up to date (newest ready release is {latest})."
 
         _activate_release(updates_dir, _install_release(updates_dir, latest))
         _prune_releases(updates_dir)
@@ -142,10 +173,14 @@ def update_ytdlp(updates_dir: Path) -> str:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    updates_dir = Path(argv[0])
+    last_error = updates_dir / "last-error"
     try:
-        message = update_ytdlp(Path(argv[0]))
+        message = update_ytdlp(updates_dir)
+        last_error.unlink(missing_ok=True)
     except Exception as error:
         message = f"Keeping the current yt-dlp: {error}"
+        last_error.write_text(f"{error}\n")
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}", flush=True)
     return 0
 

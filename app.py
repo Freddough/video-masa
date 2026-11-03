@@ -13,6 +13,7 @@ import atexit
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import mimetypes
 import webbrowser
@@ -23,8 +24,29 @@ from pathlib import Path
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_file, redirect, url_for
 from videomasa.config import int_from_env, read_app_version
-from videomasa.runtime import check_health, find_ffmpeg, prepend_executable_directory
-from videomasa.job_state import format_duration, has_active_jobs, summarize_download_error
+from videomasa.runtime import (
+    check_health,
+    find_ffmpeg,
+    locked_ytdlp_fallback,
+    prepend_executable_directory,
+    ytdlp_freshness,
+)
+from videomasa.job_state import (
+    format_duration,
+    has_active_jobs,
+    has_unsaved_work,
+    summarize_download_error,
+)
+from videomasa.storage import (
+    WHISPER_MODELS,
+    claim_directory,
+    low_disk_space_message,
+    remove_all_job_files,
+    remove_job_files,
+    storage_report,
+    whisper_cache_dir,
+    whisper_model_path,
+)
 from videomasa.security import (
     constant_time_token_match,
     cookie_path,
@@ -62,6 +84,10 @@ MAX_URL_LENGTH = int_from_env("VIDEOMASA_MAX_URL_LENGTH", 4096)
 MAX_WORKERS = int_from_env("VIDEOMASA_MAX_WORKERS", 2)
 MAX_PENDING_JOBS = int_from_env("VIDEOMASA_MAX_PENDING_JOBS", 8)
 MAX_RETAINED_JOBS = int_from_env("VIDEOMASA_MAX_RETAINED_JOBS", 100)
+MIN_FREE_BYTES = int_from_env("VIDEOMASA_MIN_FREE_MB", 2048) * 1024 * 1024
+APP_HOME = os.environ.get("VIDEOMASA_HOME", "")
+RESOURCES_DIR = os.environ.get("VIDEOMASA_RESOURCES_DIR", "")
+YTDLP_UPDATES_DIR = os.environ.get("VIDEOMASA_YTDLP_UPDATES_DIR", "")
 DOWNLOAD_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_DOWNLOAD_TIMEOUT_SECONDS", 1800))
 TRANSCRIPTION_TIMEOUT_SECONDS = max(60, int_from_env("VIDEOMASA_TRANSCRIPTION_TIMEOUT_SECONDS", 14_400))
 LONG_FORM_THRESHOLD_SECONDS = max(60, int_from_env("VIDEOMASA_LONG_FORM_THRESHOLD_SECONDS", 1200))
@@ -184,6 +210,7 @@ def _prune_terminal_jobs_locked():
             and not job.get("retryable")
         ):
             jobs.pop(job_id, None)
+            remove_job_files(WORK_DIR, job_id)
         if len(jobs) < MAX_RETAINED_JOBS:
             break
 
@@ -220,6 +247,9 @@ def _submit_job(function, *args):
 # Heartbeat tracking — browser pings every 30s, server shuts down if no ping for 5 min
 _last_heartbeat = time.time()
 _HEARTBEAT_TIMEOUT = 300  # seconds (5 minutes)
+_UNSAVED_WORK_GRACE_SECONDS = 24 * 60 * 60
+_WATCHDOG_INTERVAL_SECONDS = 30
+_work_dir_lock = None
 
 
 def _find_whisper_json(source_path, job_id):
@@ -453,6 +483,7 @@ def _transcribe_existing_file(job_id, source_path, model, make_primary=True, aff
             }
             job["stage"] = "finalizing"
             job["elapsed_seconds"] = max(0, int(round(outcome.elapsed_seconds)))
+        job["_seen"] = False
         return True
 
     try:
@@ -550,6 +581,7 @@ def _transcribe_existing_file(job_id, source_path, model, make_primary=True, aff
         job.pop("progress", None)
         job["stage"] = "finalizing"
         job["elapsed_seconds"] = max(0, int(round(elapsed)))
+    job["_seen"] = False
     return True
 
 
@@ -609,6 +641,39 @@ def _probe_formats(url, cookies_browser="none"):
         return {"video": [], "audio": []}
 
 
+def _fail_for_low_disk_space(job) -> bool:
+    message = low_disk_space_message(WORK_DIR, MIN_FREE_BYTES)
+    if not message:
+        return False
+    job.update({
+        "status": "error",
+        "stage": "error",
+        "message": message,
+        "failure_stage": "download",
+        "failure_code": "disk_space",
+        "retryable": False,
+    })
+    check_queue_and_cleanup()
+    return True
+
+
+def _run_ytdlp_download(cmd):
+    """Run a download, retrying once with the locked yt-dlp if an updated copy fails.
+
+    A release can install and run yet be broken, and only a real download shows that.
+    If the retry fails too, the updated copy's error is the one worth reporting.
+    """
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+    if result.returncode == 0:
+        return result
+    locked = locked_ytdlp_fallback()
+    if not locked:
+        return result
+    print(f"[yt-dlp fallback] updated copy exited {result.returncode}; retrying with {locked}", flush=True)
+    retry = subprocess.run([locked, *cmd[1:]], capture_output=True, text=True, timeout=DOWNLOAD_TIMEOUT_SECONDS)
+    return retry if retry.returncode == 0 else result
+
+
 def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_download: bool,
             cookies_browser: str = "none"):
     """Background worker: download video, optionally transcribe, optionally keep file for download."""
@@ -640,6 +705,9 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         job["timeout_seconds"] = DOWNLOAD_TIMEOUT_SECONDS
         job["message"] = "Downloading video..."
 
+        if _fail_for_low_disk_space(job):
+            return
+
         # Kept files get the highest H.264 resolution so they open in any editor;
         # larger sizes that only exist as VP9/AV1 stay in the quality menu.
         # Transcripts only need the audio, so those jobs keep the small combined file.
@@ -662,12 +730,7 @@ def run_job(job_id: str, url: str, model_size: str, do_transcribe: bool, do_down
         cmd.extend(["--", url])
         download_started = time.monotonic()
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=DOWNLOAD_TIMEOUT_SECONDS,
-            )
+            result = _run_ytdlp_download(cmd)
         except subprocess.TimeoutExpired:
             elapsed = max(0, int(round(time.monotonic() - download_started)))
             job.update({
@@ -937,6 +1000,9 @@ ALLOWED_EXTENSIONS = {'.mp4', '.mov', '.webm', '.mkv', '.mp3', '.wav', '.m4a', '
 def upload():
     if request.content_length and request.content_length > MAX_UPLOAD_BYTES:
         return jsonify({"error": f"Upload exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit"}), 413
+    space_message = low_disk_space_message(WORK_DIR, MIN_FREE_BYTES + (request.content_length or 0))
+    if space_message:
+        return jsonify({"error": space_message}), 507
     if 'file' not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
@@ -1002,9 +1068,25 @@ def status(job_id):
     with jobs_lock:
         job = jobs.get(job_id)
         public_job = {key: value for key, value in job.items() if not key.startswith("_")} if job else None
+        if job and not has_active_jobs([job]):
+            job["_seen"] = True
     if not job:
         return jsonify({"error": "Job not found"}), 404
     return jsonify(public_job)
+
+
+@app.route("/jobs")
+def list_jobs():
+    """List jobs newest first so a reopened page can pick up where the last one stopped."""
+    fields = ("url", "title", "filename", "status", "do_transcribe", "do_download", "model")
+    with jobs_lock:
+        listed = [
+            {"id": job_id, **{field: job.get(field) for field in fields}}
+            for job_id, job in jobs.items()
+            if not job.get("_cleared")
+        ]
+    listed.reverse()
+    return jsonify({"jobs": listed})
 
 
 @app.route("/merge/<job_id>", methods=["POST"])
@@ -1253,6 +1335,7 @@ def download_file(job_id):
     if not filepath or not Path(filepath).exists():
         return jsonify({"error": "File no longer exists on disk"}), 404
 
+    job["_saved"] = True
     return send_file(filepath, as_attachment=True, download_name=filename or Path(filepath).name)
 
 
@@ -1317,6 +1400,7 @@ def download_mp3(job_id):
         except FileNotFoundError:
             return jsonify({"error": "ffmpeg not found — required for MP3 conversion"}), 500
 
+    job["_saved"] = True
     mp3_filename = Path(job.get("filename", filepath.stem)).with_suffix(".mp3").name
     return send_file(str(mp3_path), as_attachment=True, download_name=mp3_filename)
 
@@ -1396,6 +1480,9 @@ def redownload(job_id):
 
     def do_redownload():
         try:
+            if _fail_for_low_disk_space(new_job):
+                return
+
             new_job["status"] = "downloading"
             new_job["message"] = f"Downloading at {quality_label}..."
 
@@ -1416,12 +1503,7 @@ def redownload(job_id):
 
             cmd.extend(["--", url])
             download_started = time.monotonic()
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=DOWNLOAD_TIMEOUT_SECONDS,
-            )
+            result = _run_ytdlp_download(cmd)
 
             if result.returncode != 0:
                 new_job["status"] = "error"
@@ -1485,27 +1567,25 @@ def redownload(job_id):
 
 @app.route("/cleanup/<job_id>", methods=["POST"])
 def cleanup_file(job_id):
-    """Delete the server-side video file for a completed job."""
+    """Delete the server-side files for a completed job."""
     job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
+    with jobs_lock:
+        if has_active_jobs([job]):
+            return jsonify({"error": "This job is still running"}), 409
 
     file_path = job.get("_file_path", "")
     if file_path:
-        p = Path(file_path)
-        if p.exists():
-            p.unlink(missing_ok=True)
+        Path(file_path).unlink(missing_ok=True)
         # Clean up converted MP3 too
-        mp3_p = p.with_suffix(".mp3")
-        if mp3_p.exists():
-            mp3_p.unlink(missing_ok=True)
+        Path(file_path).with_suffix(".mp3").unlink(missing_ok=True)
 
-    # Clean up thumbnail too
-    thumb_path = WORK_DIR / f"{job_id}_thumb.jpg"
-    thumb_path.unlink(missing_ok=True)
-    for model in ("tiny", "base", "small", "medium"):
+    remove_job_files(WORK_DIR, job_id)
+    for model in WHISPER_MODELS:
         cleanup_checkpoint(checkpoint_directory(WORK_DIR, job_id, model))
 
+    job["_cleared"] = True
     job["file_status"] = "cleaned"
     job["download_ready"] = False
     job["retryable"] = False
@@ -1522,8 +1602,11 @@ def check_queue_and_cleanup():
         return
     if has_active_jobs(jobs.values()):
         return
-    for job in jobs.values():
+    for job_id, job in list(jobs.items()):
         if job.get("file_status") != "present":
+            # A failed download can leave partial files with no job file pointing at them.
+            if job.get("status") == "error" and not job.get("retryable"):
+                remove_job_files(WORK_DIR, job_id, keep_thumbnail=True)
             continue
         # Don't delete files the user hasn't downloaded yet
         if job.get("download_ready"):
@@ -1533,18 +1616,17 @@ def check_queue_and_cleanup():
             continue
         file_path = job.get("_file_path", "")
         if file_path:
-            p = Path(file_path)
-            if p.exists():
-                p.unlink(missing_ok=True)
+            Path(file_path).unlink(missing_ok=True)
+        remove_job_files(WORK_DIR, job_id, keep_thumbnail=True)
         job["file_status"] = "cleaned"
 
 
 def cleanup_downloads_dir():
-    """Remove all video files from the downloads directory (used on shutdown)."""
+    """Remove every job's files, but only from a folder this process has claimed."""
+    if _work_dir_lock is None:
+        return
     try:
-        for f in WORK_DIR.iterdir():
-            if f.is_file() and f.suffix in ('.mp4', '.mkv', '.webm', '.mov', '.m4a', '.mp3', '.wav', '.json', '.srt', '.vtt', '.txt', '.tsv', '.jpg'):
-                f.unlink(missing_ok=True)
+        remove_all_job_files(WORK_DIR)
         shutil.rmtree(WORK_DIR / ".checkpoints", ignore_errors=True)
     except Exception:
         pass
@@ -1570,6 +1652,65 @@ def shutdown():
     return jsonify({"ok": True})
 
 
+def _uninstall_script():
+    """Only an installed desktop app, using its usual state folder, can uninstall itself."""
+    if not RESOURCES_DIR or Path(APP_HOME).name != ".videomasa":
+        return None
+    script = Path(RESOURCES_DIR) / "uninstall.sh"
+    return script if script.is_file() else None
+
+
+@app.route("/storage")
+def storage():
+    report = storage_report(WORK_DIR, Path(sys.prefix).resolve(), YTDLP_UPDATES_DIR or None)
+    report["uninstall_available"] = _uninstall_script() is not None
+    return jsonify(report)
+
+
+@app.route("/storage/remove-model", methods=["POST"])
+def remove_model():
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    model = (request.get_json(silent=True) or {}).get("model")
+    if model not in WHISPER_MODELS:
+        return jsonify({"error": "Unknown model"}), 400
+    with jobs_lock:
+        if has_active_jobs(jobs.values()):
+            return jsonify({"error": "Wait for running jobs to finish first"}), 409
+    whisper_model_path(model).unlink(missing_ok=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/ytdlp-status")
+def ytdlp_status():
+    return jsonify(ytdlp_freshness(YTDLP_UPDATES_DIR or None))
+
+
+@app.route("/uninstall", methods=["POST"])
+def uninstall():
+    """Stop the app and hand over to a script that removes its data and the app itself."""
+    script = _uninstall_script()
+    if not script:
+        return jsonify({"error": "Uninstall is only available in the installed app"}), 404
+    if not request.is_json:
+        return jsonify({"error": "Expected application/json"}), 415
+    if (request.get_json(silent=True) or {}).get("confirm") is not True:
+        return jsonify({"error": "Uninstall was not confirmed"}), 400
+    with jobs_lock:
+        if has_active_jobs(jobs.values()):
+            return jsonify({"error": "Wait for running jobs to finish first"}), 409
+    # A new session keeps the script alive after the system tears down the stopped app.
+    subprocess.Popen(
+        ["/bin/bash", str(script), str(os.getpid()), APP_HOME, str(whisper_cache_dir())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():
     """Browser pings this every 30s. If no ping for 5 min, server auto-shuts down."""
@@ -1580,16 +1721,34 @@ def heartbeat():
 
 def _should_shutdown_for_inactivity(now=None):
     current_time = time.time() if now is None else now
-    if current_time - _last_heartbeat <= _HEARTBEAT_TIMEOUT:
+    idle_seconds = current_time - _last_heartbeat
+    if idle_seconds <= _HEARTBEAT_TIMEOUT:
         return False
     with jobs_lock:
-        return not has_active_jobs(jobs.values())
+        if has_active_jobs(jobs.values()):
+            return False
+        # Closing the tab should not cost a finished file or transcript, but the app
+        # must not stay running forever for one nobody comes back for.
+        if idle_seconds <= _UNSAVED_WORK_GRACE_SECONDS and has_unsaved_work(jobs.values()):
+            return False
+    return True
+
+
+def _forgive_sleep(previous_tick, current_tick):
+    """Give an open tab time to check in after the computer wakes from sleep."""
+    global _last_heartbeat
+    if current_tick - previous_tick > _WATCHDOG_INTERVAL_SECONDS * 4:
+        _last_heartbeat = current_tick
 
 
 def _heartbeat_watchdog():
     """Background thread: check heartbeat, shut down if browser tab is gone."""
+    previous_tick = time.time()
     while True:
-        time.sleep(30)
+        time.sleep(_WATCHDOG_INTERVAL_SECONDS)
+        current_tick = time.time()
+        _forgive_sleep(previous_tick, current_tick)
+        previous_tick = current_tick
         if _should_shutdown_for_inactivity():
             print("\nNo browser heartbeat for 5 minutes — shutting down.")
             cleanup_downloads_dir()
@@ -1598,6 +1757,11 @@ def _heartbeat_watchdog():
 
 
 if __name__ == "__main__":
+    # Another running copy owns this folder, and cleaning it would delete that copy's files.
+    _work_dir_lock = claim_directory(WORK_DIR)
+    if _work_dir_lock is None:
+        print(f"Another copy of Video Masa is already using {WORK_DIR}. Close it and try again.")
+        sys.exit(1)
     # Clean up any leftover files from a previous un-clean shutdown
     cleanup_downloads_dir()
     port = APP_PORT

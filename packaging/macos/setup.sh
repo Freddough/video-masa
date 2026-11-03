@@ -16,6 +16,7 @@ APP_DIR="$RESOURCES_DIR/app"
 VM_HOME="${VIDEOMASA_HOME:-$HOME/.videomasa}"
 VENV_DIR="$VM_HOME/venv"
 VERSION_FILE="$VM_HOME/version"
+LOCK_HASH_FILE="$VM_HOME/lock-hash"
 LOCK_DIR="$VM_HOME/setup.lock"
 REQUIREMENTS_FILE="$APP_DIR/requirements.lock.txt"
 
@@ -166,8 +167,8 @@ echo "       Done."
 echo ""
 
 echo "[2/4] Installing locked dependencies (this may take a few minutes)..."
-"$TEMP_PYTHON" -m pip install --disable-pip-version-check --upgrade "pip==26.1.2"
-"$TEMP_PYTHON" -m pip install --disable-pip-version-check --require-hashes --requirement "$REQUIREMENTS_FILE"
+"$TEMP_PYTHON" -m pip install --disable-pip-version-check --no-cache-dir --upgrade "pip==26.1.2"
+"$TEMP_PYTHON" -m pip install --disable-pip-version-check --no-cache-dir --require-hashes --requirement "$REQUIREMENTS_FILE"
 
 # Whisper invokes a command named `ffmpeg`. The pinned imageio-ffmpeg wheel
 # supplies the correct macOS architecture binary, so expose it in venv/bin.
@@ -246,6 +247,7 @@ printf '%s\n' "$APP_VERSION" > "$VERSION_TEMP"
 mv "$VERSION_TEMP" "$VERSION_FILE"
 VERSION_TEMP=""
 chmod 600 "$VERSION_FILE" 2>/dev/null || true
+/usr/bin/shasum -a 256 "$REQUIREMENTS_FILE" | /usr/bin/cut -d' ' -f1 > "$LOCK_HASH_FILE"
 
 # A repair or app upgrade returns to the locked yt-dlp until the next update check.
 rm -rf "$VM_HOME/ytdlp"

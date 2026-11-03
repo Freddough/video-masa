@@ -20,6 +20,22 @@ def has_active_jobs(job_values) -> bool:
     return False
 
 
+def has_unsaved_work(job_values) -> bool:
+    """Return whether stopping now would lose something the user cannot get back."""
+    for job in job_values:
+        if job.get("_cleared"):
+            continue
+        file_present = job.get("file_status") == "present"
+        if file_present and job.get("retryable"):
+            return True
+        if file_present and job.get("download_ready") and not job.get("_saved"):
+            return True
+        has_transcript = job.get("transcript") or job.get("transcripts")
+        if job.get("status") == "done" and has_transcript and not job.get("_seen"):
+            return True
+    return False
+
+
 def summarize_download_error(stderr) -> str:
     """Return the failure from yt-dlp stderr, not the warnings printed before it."""
     text = (stderr or "").strip()
